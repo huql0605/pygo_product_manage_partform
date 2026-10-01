@@ -1,8 +1,9 @@
 package product
 
 import (
-	"encoding/json"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
@@ -13,31 +14,24 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) List(c *gin.Context) {
 	item, err := h.svc.List()
 	if err != nil {
-		writeJson(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	writeJson(w, http.StatusOK, item)
+	c.JSON(http.StatusOK, item)
 }
 
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Create(c *gin.Context) {
 	var p Product
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJson(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if err := c.ShouldBindJSON(&p); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	if err := h.svc.Create(&p); err != nil {
-		writeJson(w, http.StatusBadRequest, map[string]string{"error": "name is require"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is require"})
 		return
 	}
-	writeJson(w, http.StatusCreated, p)
-}
-
-func writeJson(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-
+	c.JSON(http.StatusCreated, p)
 }

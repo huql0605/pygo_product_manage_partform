@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"net/http"
 
 	"github.com/huql0605/go_api/internal/database"
 	"github.com/huql0605/go_api/internal/router"
@@ -18,5 +17,5 @@ func main() {
 	router.MustMigrate(db)
 	r := router.New(db)
 	log.Println("go api listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", r))
+	log.Fatal(r.Run(":8080"))
 }

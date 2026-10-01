@@ -2,32 +2,25 @@ package router
 
 import (
 	"log"
-	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/huql0605/go_api/internal/product"
 	"gorm.io/gorm"
 )
 
-func New(db *gorm.DB) http.Handler {
-	mux := http.NewServeMux()
+func New(db *gorm.DB) *gin.Engine {
+	r := gin.Default()
+	r.HandleMethodNotAllowed = true
 	repo := product.NewRepository(db)
 	svc := product.NewService(repo)
 	ph := product.NewHandler(svc)
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("ok"))
+	r.GET("/health", func(c *gin.Context) {
+		c.String(200, "ok")
 	})
-	mux.HandleFunc("/api/products", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			ph.List(w, r)
-		case http.MethodPost:
-			ph.Create(w, r)
-		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	return mux
+	r.GET("/api/products", ph.List)
+	r.POST("/api/products", ph.Create)
+	return r
 }
 
 func MustMigrate(db *gorm.DB) {
