@@ -1,15 +1,18 @@
 package router
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/huql0605/go_api/internal/product"
+	"gorm.io/gorm"
 )
 
-func New() http.Handler {
+func New(db *gorm.DB) http.Handler {
 	mux := http.NewServeMux()
-	store := product.NewStore()
-	ph := product.NewHandler(store)
+	repo := product.NewRepository(db)
+	svc := product.NewService(repo)
+	ph := product.NewHandler(svc)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
@@ -25,4 +28,10 @@ func New() http.Handler {
 		}
 	})
 	return mux
+}
+
+func MustMigrate(db *gorm.DB) {
+	if err := db.AutoMigrate(&product.Product{}); err != nil {
+		log.Fatalf("migrate failed :%v", err)
+	}
 }

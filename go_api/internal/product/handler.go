@@ -6,15 +6,20 @@ import (
 )
 
 type Handler struct {
-	store *Store
+	svc *Service
 }
 
-func NewHandler(store *Store) *Handler {
-	return &Handler{store: store}
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	writeJson(w, http.StatusOK, h.store.List())
+	item, err := h.svc.List()
+	if err != nil {
+		writeJson(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJson(w, http.StatusOK, item)
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
@@ -23,11 +28,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJson(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if p.Name == "" {
+	if err := h.svc.Create(&p); err != nil {
 		writeJson(w, http.StatusBadRequest, map[string]string{"error": "name is require"})
 		return
 	}
-	writeJson(w, http.StatusCreated, h.store.Create(p))
+	writeJson(w, http.StatusCreated, p)
 }
 
 func writeJson(w http.ResponseWriter, status int, v any) {
