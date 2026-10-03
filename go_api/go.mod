@@ -1,6 +1,6 @@
 module github.com/huql0605/go_api
 
-go 1.26.3
+go 1.26
 
 require (
 	github.com/gin-gonic/gin v1.12.0

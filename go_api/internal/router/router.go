@@ -25,6 +25,8 @@ func New(db *gorm.DB) *gin.Engine {
 	r.POST("/api/products", ph.Create)
 	r.GET("api/analytics/sales", ah.Sales)
 	r.GET("/api/analytics/top-products", ah.TopProducts)
+	r.GET("/api/analytics/brans", ah.Brands)
+	r.GET("/api/analytics/monthly-trend", ah.MonthlyTrend)
 	return r
 }
 

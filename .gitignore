@@ -8,6 +8,12 @@
 *.so
 *.dylib
 
+# Python bytecode and cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+
+
 # Test binary, built with `go test -c`
 *.test
 

@@ -72,3 +72,25 @@ func (c *Client) TopProducts(ctx context.Context, limit int) ([]map[string]any, 
 	}
 	return out, nil
 }
+
+func (c *Client) Brands(ctx context.Context, limit int) ([]map[string]any, error) {
+	q := url.Values{}
+	q.Set("limit", fmt.Sprintf("%d", limit))
+	var out []map[string]any
+	if err := c.get(ctx, "/analytics/brands", q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) MonthlyTrend(ctx context.Context, productor string) ([]map[string]any, error) {
+	q := url.Values{}
+	if productor != "" {
+		q.Set("productor", productor)
+	}
+	var out []map[string]any
+	if err := c.get(ctx, "/analytics/monthly-trend", q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

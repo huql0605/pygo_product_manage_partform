@@ -42,3 +42,30 @@ func (h *Handler) TopProducts(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, data)
 }
+
+func (h *Handler) Brands(c *gin.Context) {
+	limit, err := strconv.Atoi(c.Query("limit"))
+	if err != nil || limit <= 0 {
+		limit = 5
+	}
+	data, err := h.client.Brands(c.Request.Context(), limit)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
+
+func (h *Handler) MonthlyTrend(c *gin.Context) {
+	productor := c.Query("productor")
+	data, err := h.client.MonthlyTrend(c.Request.Context(), productor)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
