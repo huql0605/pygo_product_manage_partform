@@ -2,7 +2,8 @@ import csv
 import requests
 import time
 from datetime import datetime
-GO_API = "http://localhost:8080"
+from app.config import Settings
+GO_API = Settings.go_api_url
 
 def import_product(path :str):
     with open(path ,newline="",encoding="utf-8-sig") as f:

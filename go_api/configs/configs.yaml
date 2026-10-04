@@ -1,0 +1,12 @@
+server:
+  port: 8080
+database:
+  host: localhost
+  port: 5432
+  user: leohu
+  password: hu0605
+  dbname: db1
+  sslmode: disable
+python:
+  base_url: http://127.0.0.1:8000
+  timeout: 10s

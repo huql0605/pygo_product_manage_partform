@@ -5,13 +5,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/huql0605/go_api/internal/analytics"
+	"github.com/huql0605/go_api/internal/config"
 	"github.com/huql0605/go_api/internal/product"
 	"gorm.io/gorm"
 )
 
-func New(db *gorm.DB) *gin.Engine {
+func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r := gin.Default()
-	pyClient := analytics.NewClient("http://127.0.0.1:8000")
+	base_url := cfg.Python.BaseURL
+	pyClient := analytics.NewClient(base_url)
 	r.HandleMethodNotAllowed = true
 	repo := product.NewRepository(db)
 	svc := product.NewService(repo)
@@ -25,7 +27,7 @@ func New(db *gorm.DB) *gin.Engine {
 	r.POST("/api/products", ph.Create)
 	r.GET("api/analytics/sales", ah.Sales)
 	r.GET("/api/analytics/top-products", ah.TopProducts)
-	r.GET("/api/analytics/brans", ah.Brands)
+	r.GET("/api/analytics/brands", ah.Brands)
 	r.GET("/api/analytics/monthly-trend", ah.MonthlyTrend)
 	return r
 }

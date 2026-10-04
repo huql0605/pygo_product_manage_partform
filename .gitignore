@@ -9,10 +9,7 @@
 *.dylib
 
 # Python bytecode and cache directories
-__pycache__/
-*.py[cod]
-*$py.class
-
+*.pyc
 
 # Test binary, built with `go test -c`
 *.test
@@ -36,3 +33,5 @@ go.work.sum
 # Editor/IDE
 # .idea/
 .vscode/
+python_code/app/api/__pycache__/analytics.cpython-314.pyc
+python_code/app/modules/analytics/__pycache__/service.cpython-314.pyc
