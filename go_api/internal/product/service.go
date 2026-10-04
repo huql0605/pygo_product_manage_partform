@@ -18,8 +18,5 @@ func (s *Service) Create(p *Product) error {
 	if p.Name == "" {
 		return errors.New("name require")
 	}
-	if p.Price < 0 {
-		return errors.New("price must be >= 0")
-	}
 	return s.repo.Create(p)
 }

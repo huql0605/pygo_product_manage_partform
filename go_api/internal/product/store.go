@@ -27,8 +27,8 @@ func (s *Store) List() []Product {
 func (s *Store) Create(p Product) Product {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p.Id = uint(s.nextId)
+	p.ID = uint(s.nextId)
 	s.nextId++
-	s.items[int(p.Id)] = p
+	s.items[int(p.ID)] = p
 	return p
 }

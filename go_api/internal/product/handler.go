@@ -1,9 +1,9 @@
 package product
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
+	"github.com/huql0605/go_api/internal/common/errors"
+	"github.com/huql0605/go_api/internal/common/response"
 )
 
 type Handler struct {
@@ -15,23 +15,28 @@ func NewHandler(svc *Service) *Handler {
 }
 
 func (h *Handler) List(c *gin.Context) {
-	item, err := h.svc.List()
+
+	items, err := h.svc.List()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		response.InternalError(c, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, item)
+	response.Success(c, items)
 }
 
 func (h *Handler) Create(c *gin.Context) {
-	var p Product
-	if err := c.ShouldBindJSON(&p); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	var req CreateProductReq
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, errors.CodeInvalidParam, err.Error())
 		return
+	}
+	p := Product{
+		Name: req.Name,
 	}
 	if err := h.svc.Create(&p); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is require"})
+		response.BadRequest(c, errors.CodeInvalidParam, err.Error())
 		return
 	}
-	c.JSON(http.StatusCreated, p)
+	response.Success(c, p)
 }

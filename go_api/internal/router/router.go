@@ -7,6 +7,7 @@ import (
 	"github.com/huql0605/go_api/internal/analytics"
 	"github.com/huql0605/go_api/internal/config"
 	"github.com/huql0605/go_api/internal/product"
+	"github.com/huql0605/go_api/internal/sale"
 	"gorm.io/gorm"
 )
 
@@ -33,7 +34,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 }
 
 func MustMigrate(db *gorm.DB) {
-	if err := db.AutoMigrate(&product.Product{}); err != nil {
-		log.Fatalf("migrate failed :%v", err)
+	if err := db.AutoMigrate(&product.Product{}, &sale.Sales{}); err != nil {
+		log.Fatalf("migrate failed: %v", err)
 	}
 }

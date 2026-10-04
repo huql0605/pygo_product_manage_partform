@@ -1,9 +1,22 @@
 import csv
-import requests
+import sys
 import time
 from datetime import datetime
-from app.config import Settings
-GO_API = Settings.go_api_url
+from pathlib import Path
+
+import requests
+
+# 保证从任意工作目录运行都能找到 app 包（python_code 目录）
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+# CSV 文件位于工作区根目录（python_code 的上一级）
+CSV_PATH = SCRIPT_DIR.parent / "phone_sales.csv"
+
+from app.config import settings
+
+GO_API = settings.go_api_url
 
 def import_product(path :str):
     with open(path ,newline="",encoding="utf-8-sig") as f:
@@ -32,4 +45,4 @@ def import_product(path :str):
     print("current product : ",r.json)
 
 if __name__=="__main__":
-    import_product("phone_sales.csv")
+    import_product(str(CSV_PATH))
