@@ -6,13 +6,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/huql0605/go_api/internal/analytics"
 	"github.com/huql0605/go_api/internal/config"
+	"github.com/huql0605/go_api/internal/middleware"
 	"github.com/huql0605/go_api/internal/product"
 	"github.com/huql0605/go_api/internal/sale"
 	"gorm.io/gorm"
 )
 
 func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
-	r := gin.Default()
+	r := gin.New()
 	base_url := cfg.Python.BaseURL
 	pyClient := analytics.NewClient(base_url)
 	r.HandleMethodNotAllowed = true
@@ -21,12 +22,16 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	ph := product.NewHandler(svc)
 	ah := analytics.NewHandler(pyClient)
 
+	// 顺序很重要：先生成/取出 RequestID，Logger 才能打出来。
+	r.Use(middleware.RequestID())
+	r.Use(middleware.Logger())
+
 	r.GET("/health", func(c *gin.Context) {
 		c.String(200, "ok")
 	})
 	r.GET("/api/products", ph.List)
 	r.POST("/api/products", ph.Create)
-	r.GET("api/analytics/sales", ah.Sales)
+	r.GET("/api/analytics/sales", ah.Sales)
 	r.GET("/api/analytics/top-products", ah.TopProducts)
 	r.GET("/api/analytics/brands", ah.Brands)
 	r.GET("/api/analytics/monthly-trend", ah.MonthlyTrend)

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/huql0605/go_api/internal/common/requestid"
 )
 
 type Client struct {
@@ -32,6 +34,11 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return fmt.Errorf("new request: %w", err)
+	}
+
+	// 把上游请求的 RequestID 透传给 Python，实现跨语言日志串联。
+	if requestID := requestid.FromContext(ctx); requestID != "" {
+		req.Header.Set("X-Request-ID", requestID)
 	}
 
 	resp, err := c.http.Do(req)
