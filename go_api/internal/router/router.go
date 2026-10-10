@@ -19,6 +19,9 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.HandleMethodNotAllowed = true
 	repo := product.NewRepository(db)
 	svc := product.NewService(repo)
+	salerepo := sale.NewRepository(db)
+	salesvc := sale.NewService(salerepo, repo)
+	sh := sale.NewHandler(salesvc)
 	ph := product.NewHandler(svc)
 	ah := analytics.NewHandler(pyClient)
 
@@ -30,6 +33,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		c.String(200, "ok")
 	})
 	r.GET("/api/products", ph.List)
+	r.POST("/api/sales/batch", sh.CreateBatch)
 	r.POST("/api/products", ph.Create)
 	r.GET("/api/analytics/sales", ah.Sales)
 	r.GET("/api/analytics/top-products", ah.TopProducts)

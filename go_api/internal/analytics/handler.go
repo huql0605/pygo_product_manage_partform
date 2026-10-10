@@ -1,10 +1,11 @@
 package analytics
 
 import (
-	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/huql0605/go_api/internal/common/errors"
+	"github.com/huql0605/go_api/internal/common/response"
 )
 
 type Handler struct {
@@ -16,17 +17,14 @@ func NewHandler(client *Client) *Handler {
 }
 
 func (h *Handler) Sales(c *gin.Context) {
-	days, err := strconv.Atoi(c.Query("days"))
-	if err != nil || days <= 0 {
-		days = 7
-	}
-
-	data, err := h.client.Sales(c.Request.Context(), days)
+	startMonth := c.Query("start_month")
+	endMonth := c.Query("end_month")
+	data, err := h.client.Sales(c.Request.Context(), startMonth, endMonth)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, data)
+	response.Success(c, data)
 
 }
 
@@ -37,10 +35,10 @@ func (h *Handler) TopProducts(c *gin.Context) {
 	}
 	data, err := h.client.TopProducts(c.Request.Context(), limit)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, data)
+	response.Success(c, data)
 }
 
 func (h *Handler) Brands(c *gin.Context) {
@@ -50,22 +48,18 @@ func (h *Handler) Brands(c *gin.Context) {
 	}
 	data, err := h.client.Brands(c.Request.Context(), limit)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": err.Error(),
-		})
+		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, data)
+	response.Success(c, data)
 }
 
 func (h *Handler) MonthlyTrend(c *gin.Context) {
 	productor := c.Query("productor")
 	data, err := h.client.MonthlyTrend(c.Request.Context(), productor)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": err.Error(),
-		})
+		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, data)
+	response.Success(c, data)
 }

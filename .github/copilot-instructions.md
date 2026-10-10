@@ -35,6 +35,10 @@ python -m uvicorn app.main:app --reload
 
 There are currently no Python test or lint configuration files or test files. The API needs a reachable PostgreSQL database for analytics queries.
 
+## MCP
+
+- `.mcp.json` configures the PostgreSQL MCP server in restricted (read-only) mode. It requires `uvx` and the `POSTGRES_CONNECTION_STRING` environment variable; keep the connection string out of tracked files.
+
 ## Codebase conventions
 
 - In Go, keep HTTP concerns in Gin handlers, application logic in the service, and database operations in repositories. Route registration and dependency wiring belong in `internal/router`.

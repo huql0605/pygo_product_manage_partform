@@ -58,9 +58,14 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	return nil
 }
 
-func (c *Client) Sales(ctx context.Context, days int) (map[string]any, error) {
+func (c *Client) Sales(ctx context.Context, startMonth, endMonth string) (map[string]any, error) {
 	q := url.Values{}
-	q.Set("days", fmt.Sprintf("%d", days))
+	if startMonth!=""{
+		q.Set("start_month",startMonth)
+	}
+	if endMonth!=""{
+		q.Set("end_month",endMonth)
+	}
 
 	var out map[string]any
 	if err := c.get(ctx, "/analytics/sales", q, &out); err != nil {

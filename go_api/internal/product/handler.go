@@ -32,7 +32,8 @@ func (h *Handler) Create(c *gin.Context) {
 		return
 	}
 	p := Product{
-		Name: req.Name,
+		Name:  req.Name,
+		Price: req.Price,
 	}
 	if err := h.svc.Create(&p); err != nil {
 		response.BadRequest(c, errors.CodeInvalidParam, err.Error())

@@ -33,3 +33,7 @@ func NotFound(c *gin.Context, msg string) {
 func InternalError(c *gin.Context, msg string) {
 	Fail(c, http.StatusInternalServerError, 10004, msg)
 }
+
+func BadGateway(c *gin.Context, code int, msg string) {
+	Fail(c, http.StatusBadGateway, code, msg)
+}

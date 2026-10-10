@@ -12,7 +12,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 # CSV 文件位于工作区根目录（python_code 的上一级）
-CSV_PATH = SCRIPT_DIR.parent / "phone_sales.csv"
+CSV_PATH = SCRIPT_DIR.parent / "products.csv"
 
 from app.config import settings
 
@@ -26,11 +26,8 @@ def import_product(path :str):
 
     for row in rows:
         resp = requests.post(url=f"{GO_API}/api/products",json={
-            "productor":row["productor"],
-            "name":row["name"],
-            "price":float(row["price"]),
-            "sales":int(row["sales"]) ,
-            "month":datetime.strptime(row["month"], "%Y-%m").strftime("%Y-%m-%dT%H:%M:%SZ")
+            "name": row["name"],
+            "price": float(row["price"])
                   
         })
         if resp.status_code==201:
