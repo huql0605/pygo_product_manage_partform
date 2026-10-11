@@ -6,12 +6,13 @@ import (
 	"strconv"
 
 	"github.com/huql0605/go_api/internal/config"
-
 	"github.com/huql0605/go_api/internal/database"
 	"github.com/huql0605/go_api/internal/router"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	_ = godotenv.Load("./.env")
 	cfg, err := config.Load("configs/configs.yaml")
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)

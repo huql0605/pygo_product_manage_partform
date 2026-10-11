@@ -30,7 +30,7 @@ def import_product(path :str):
             "price": float(row["price"])
                   
         })
-        if resp.status_code==201:
+        if resp.status_code==200:
             ok+=1
             print(f"ok {row['name']}")
         else:
@@ -39,7 +39,7 @@ def import_product(path :str):
 
     r = requests.get(f"{GO_API}/api/products")
 
-    print("current product : ",r.json)
+    print("current product : ",r.json())
 
 if __name__=="__main__":
     import_product(str(CSV_PATH))

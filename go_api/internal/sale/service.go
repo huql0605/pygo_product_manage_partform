@@ -33,7 +33,7 @@ func (s *Service) CreateBatch(product string, rows []SaleRow) (*CreateBatchResul
 	items := make([]Sales, 0, len(rows))
 	for i, row := range rows {
 		if !monthRe.MatchString(row.Month) {
-			return nil, fmt.Errorf("地 %d 行月份格式错误: %q (需要 YYYY-MM)", i+1, row.Month)
+			return nil, fmt.Errorf("第 %d 行月份格式错误: %q (需要 YYYY-MM)", i+1, row.Month)
 		}
 		items = append(items, Sales{
 			ProductID: productID,
