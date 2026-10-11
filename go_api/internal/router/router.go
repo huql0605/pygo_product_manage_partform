@@ -8,6 +8,7 @@ import (
 	"github.com/huql0605/go_api/internal/config"
 	"github.com/huql0605/go_api/internal/middleware"
 	"github.com/huql0605/go_api/internal/product"
+	"github.com/huql0605/go_api/internal/raw"
 	"github.com/huql0605/go_api/internal/sale"
 	"gorm.io/gorm"
 )
@@ -17,10 +18,17 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	base_url := cfg.Python.BaseURL
 	pyClient := analytics.NewClient(base_url)
 	r.HandleMethodNotAllowed = true
+
 	repo := product.NewRepository(db)
 	svc := product.NewService(repo)
+
 	salerepo := sale.NewRepository(db)
 	salesvc := sale.NewService(salerepo, repo)
+
+	rawRepo := raw.NewRepository(db)
+	rawSvc := raw.NewService(rawRepo)
+
+	rh := raw.NewHandler(rawSvc)
 	sh := sale.NewHandler(salesvc)
 	ph := product.NewHandler(svc)
 	ah := analytics.NewHandler(pyClient)
@@ -28,13 +36,14 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	// 顺序很重要：先生成/取出 RequestID，Logger 才能打出来。
 	r.Use(middleware.RequestID())
 	r.Use(middleware.Logger())
-
+	r.Use(gin.Recovery())
 	r.GET("/health", func(c *gin.Context) {
 		c.String(200, "ok")
 	})
 	r.GET("/api/products", ph.List)
 	r.POST("/api/sales/batch", sh.CreateBatch)
 	r.POST("/api/products", ph.Create)
+	r.POST("/api/imports", rh.CreateImport)
 	r.GET("/api/analytics/sales", ah.Sales)
 	r.GET("/api/analytics/top-products", ah.TopProducts)
 	r.GET("/api/analytics/brands", ah.Brands)
@@ -43,7 +52,10 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 }
 
 func MustMigrate(db *gorm.DB) {
-	if err := db.AutoMigrate(&product.Product{}, &sale.Sales{}); err != nil {
+	if err := db.AutoMigrate(
+		&product.Product{}, &sale.Sales{},
+		&raw.ImportBatch{}, &raw.RawRecord{},
+	); err != nil {
 		log.Fatalf("migrate failed: %v", err)
 	}
 }
