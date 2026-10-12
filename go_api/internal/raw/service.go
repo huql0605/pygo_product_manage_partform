@@ -15,7 +15,7 @@ func NewService(repo *Repository) *Service {
 
 type CreateResult struct {
 	BatchID  uint `json:"batch_id"`
-	RowCount int  `json:"rowcount"`
+	RowCount int  `json:"row_count"`
 }
 
 func (s *Service) CreateBatch(source, category string, rows []map[string]any) (*CreateResult, error) {

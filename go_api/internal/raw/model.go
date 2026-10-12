@@ -23,8 +23,8 @@ type ImportBatch struct {
 
 type RawRecord struct {
 	ID        uint            `json:"id" gorm:"primarykey"`
-	BatchID   uint            `json:"batch_id" gorm:"not null;index;primarykey"`
-	RowIndex  int             `json:"rowindex" gorm:"not null"`
+	BatchID   uint            `json:"batch_id" gorm:"not null;index"`
+	RowIndex  int             `json:"row_index" gorm:"not null"`
 	RowData   json.RawMessage `json:"row_data" gorm:"type:jsonb;not null"`
 	CreatedAt time.Time
 }
