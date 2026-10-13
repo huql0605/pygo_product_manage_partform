@@ -10,5 +10,6 @@ type SaleRow struct {
 
 type BatchCreateSalesReq struct {
 	Product string    `json:"product" binding:"required,min=1"`
+	BatchID *uint     `json:"batch_id"`
 	Rows    []SaleRow `json:"rows" binding:"required,min=1"`
 }

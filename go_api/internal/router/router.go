@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/huql0605/go_api/internal/analytics"
 	"github.com/huql0605/go_api/internal/config"
+	"github.com/huql0605/go_api/internal/mapping"
 	"github.com/huql0605/go_api/internal/middleware"
 	"github.com/huql0605/go_api/internal/product"
 	"github.com/huql0605/go_api/internal/raw"
@@ -28,6 +29,10 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	rawRepo := raw.NewRepository(db)
 	rawSvc := raw.NewService(rawRepo)
 
+	mappingRepo := mapping.NewRepository(db)
+	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc)
+
+	mh := mapping.NewHandler(mappingSvc)
 	rh := raw.NewHandler(rawSvc)
 	sh := sale.NewHandler(salesvc)
 	ph := product.NewHandler(svc)
@@ -44,6 +49,10 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.POST("/api/sales/batch", sh.CreateBatch)
 	r.POST("/api/products", ph.Create)
 	r.POST("/api/imports", rh.CreateImport)
+	r.POST("/api/imports/:id/transform", mh.Transform)
+	r.GET("/api/imports/:id/columns", rh.ListColumns)
+	r.POST("/api/mappings", mh.Upsert)
+	r.GET("/api/mappings", mh.List)
 	r.GET("/api/analytics/sales", ah.Sales)
 	r.GET("/api/analytics/top-products", ah.TopProducts)
 	r.GET("/api/analytics/brands", ah.Brands)
@@ -55,6 +64,7 @@ func MustMigrate(db *gorm.DB) {
 	if err := db.AutoMigrate(
 		&product.Product{}, &sale.Sales{},
 		&raw.ImportBatch{}, &raw.RawRecord{},
+		&mapping.FieldMapping{},
 	); err != nil {
 		log.Fatalf("migrate failed: %v", err)
 	}

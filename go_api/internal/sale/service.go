@@ -21,22 +21,20 @@ func NewService(repo *Repository, prodcuts ProductResolver) *Service {
 }
 
 type CreateBatchResult struct {
-	ProductID uint `json:"product_id"`
-	Inserted  int  `json:"inserted"`
+	ProductID uint  `json:"product_id"`
+	BatchID   *uint `json:"batch_id"`
+	Inserted  int   `json:"inserted"`
 }
 
-func (s *Service) CreateBatch(product string, rows []SaleRow) (*CreateBatchResult, error) {
-	productID, err := s.products.FindIDByName(product)
-	if err != nil {
-		return nil, fmt.Errorf("品类 %q 不存在 , 请先创建商品", product)
-	}
+func (s *Service) buildItems(productID uint, batchID *uint, rows []SaleRow) ([]Sales, error) {
 	items := make([]Sales, 0, len(rows))
 	for i, row := range rows {
 		if !monthRe.MatchString(row.Month) {
-			return nil, fmt.Errorf("第 %d 行月份格式错误: %q (需要 YYYY-MM)", i+1, row.Month)
+			return nil, fmt.Errorf("第 %d 行月份格式错误： %q (需要 YYYY-MM)", i+1, row.Month)
 		}
 		items = append(items, Sales{
 			ProductID: productID,
+			BatchID:   batchID,
 			Productor: row.Productor,
 			Name:      row.Name,
 			Price:     row.Price,
@@ -44,8 +42,35 @@ func (s *Service) CreateBatch(product string, rows []SaleRow) (*CreateBatchResul
 			Month:     row.Month,
 		})
 	}
+	return items, nil
+}
+
+func (s *Service) CreateBatch(product string, batchID *uint, rows []SaleRow) (*CreateBatchResult, error) {
+	productID, err := s.products.FindIDByName(product)
+	if err != nil {
+		return nil, fmt.Errorf("品类 %q 不存在 , 请先创建商品", product)
+	}
+	items, err := s.buildItems(productID, batchID, rows)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.repo.CreateMany(items); err != nil {
 		return nil, err
 	}
-	return &CreateBatchResult{ProductID: productID, Inserted: len(items)}, nil
+	return &CreateBatchResult{ProductID: productID, BatchID: batchID, Inserted: len(items)}, nil
+}
+
+func (s *Service) ReplaceBatch(product string, batchID uint, rows []SaleRow) (*CreateBatchResult, error) {
+    productID, err := s.products.FindIDByName(product)
+    if err != nil {
+        return nil, fmt.Errorf("品类 %q 不存在，请先创建商品", product)
+    }
+    items, err := s.buildItems(productID, &batchID, rows)
+    if err != nil {
+        return nil, err
+    }
+    if err := s.repo.ReplaceBatch(batchID, items); err != nil {
+        return nil, err
+    }
+    return &CreateBatchResult{ProductID: productID, BatchID: &batchID, Inserted: len(items)}, nil
 }

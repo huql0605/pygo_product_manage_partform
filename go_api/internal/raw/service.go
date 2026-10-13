@@ -2,8 +2,13 @@ package raw
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+
+	"gorm.io/gorm"
 )
+
+var ErrBatchNotFound = errors.New("批次不存在")
 
 type Service struct {
 	repo *Repository
@@ -42,4 +47,14 @@ func (s *Service) CreateBatch(source, category string, rows []map[string]any) (*
 	}
 	return &CreateResult{BatchID: batch.ID, RowCount: len(records)}, nil
 
+}
+
+func (s *Service) ListColumns(batchID uint) ([]ColumnInfo, error) {
+	if _, err := s.repo.GetBatch(batchID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrBatchNotFound
+		}
+		return nil, err
+	}
+	return s.repo.ListColumns(batchID)
 }

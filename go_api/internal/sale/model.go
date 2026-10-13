@@ -5,6 +5,7 @@ import "time"
 type Sales struct {
 	ID        uint      `json:"id" gorm:"primarykey"`
 	ProductID uint      `json:"product_id" gorm:"not null;index"`
+	BatchID   *uint     `json:"batch_id" gorm:"index"` //手工导入时为空
 	Productor string    `json:"productor" gorm:"not null;index"`
 	Name      string    `json:"name" gorm:"not null;index"`
 	Price     float64   `json:"price" gorm:"not null"`

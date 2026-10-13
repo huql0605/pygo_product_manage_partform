@@ -20,7 +20,7 @@ func (h *Handler) CreateBatch(c *gin.Context) {
 		response.BadRequest(c, errors.CodeInvalidParam, err.Error())
 		return
 	}
-	res, err := h.svc.CreateBatch(req.Product, req.Rows)
+	res, err := h.svc.CreateBatch(req.Product, req.BatchID, req.Rows)
 	if err != nil {
 		response.InternalError(c, err.Error())
 		return
