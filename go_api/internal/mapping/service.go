@@ -91,7 +91,7 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 行 JSON 解析失败: %w", lineNo, err)
 		}
-		values, ignored := resolveRow(obj, rules)
+		values, ignored,err := resolveRow(obj, rules)
 		for _, col := range ignored {
 			ignoredSet[col] = struct{}{}
 		}

@@ -28,8 +28,9 @@ func decodeRow(data []byte) (map[string]any, error) {
 //  2. 恒等回退     源列名本身就是标准字段名（让批次 1 零配置）
 //  3. 都不匹配     记入 ignored —— 数据不丢，只是本次转换用不上
 
-func resolveRow(row map[string]any, rules map[string]string) (map[string]string, []string) {
+func resolveRow(row map[string]any, rules map[string]string) (map[string]string, []string, error) {
 	values := make(map[string]string, len(StandardFields))
+	origin := make(map[string]string, len(StandardFields))
 	var ignored []string
 
 	for col, raw := range row {
@@ -41,12 +42,13 @@ func resolveRow(row map[string]any, rules map[string]string) (map[string]string,
 			ignored = append(ignored, col)
 			continue
 		}
-		if _, exists := values[target]; !exists {
-			values[target] = valueToString(raw)
+		if prev, exists := origin[target]; exists {
+			return nil, nil, fmt.Errorf("字段 %q 有多个来源列： %q 和 %q ", target, prev, col)
 		}
-
+		origin[target] = col
+		values[target] = valueToString(raw)
 	}
-	return values, ignored
+	return values, ignored, nil
 
 }
 
