@@ -45,7 +45,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.GET("/health", func(c *gin.Context) {
 		c.String(200, "ok")
 	})
-	r.GET("/api/products", ph.List)
+	r.GET("/api/products", ph.List) //获取sales表所有商品
 	r.POST("/api/sales/batch", sh.CreateBatch)
 	r.POST("/api/products", ph.Create)
 	r.POST("/api/imports", rh.CreateImport)
