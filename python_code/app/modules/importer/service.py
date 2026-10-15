@@ -17,7 +17,7 @@ class ImporterService:
         self.timeout=timeout
 
 
-    def import_rows(self,source:str,rows:list[dict],category:str):
+    def import_rows(self,source:str,category:str,rows:list[dict]) ->ImportResult:
         json_data={
             "source":source,
             "category":category,

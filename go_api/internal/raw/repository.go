@@ -53,3 +53,10 @@ func (r *Repository) UpdateStatus(BatchID uint, status string) error {
 	return r.db.Model(&ImportBatch{}).Where("id = ? ", BatchID).Update("status", status).Error
 
 }
+
+// CountRecords 统计某批次已入库的原始行数。
+func (r *Repository) CountRecords(batchID uint) (int64, error) {
+	var count int64
+	err := r.db.Model(&RawRecord{}).Where("batch_id = ?", batchID).Count(&count).Error
+	return count, err
+}

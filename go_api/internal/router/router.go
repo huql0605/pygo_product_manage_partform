@@ -51,6 +51,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.POST("/api/imports", rh.CreateImport)
 	r.POST("/api/imports/:id/transform", mh.Transform)
 	r.GET("/api/imports/:id/columns", rh.ListColumns)
+	r.GET("/api/imports/:id", rh.ShowImportsCount)
 	r.POST("/api/mappings", mh.Upsert)
 	r.GET("/api/mappings", mh.List)
 	r.GET("/api/analytics/sales", ah.Sales)

@@ -51,3 +51,21 @@ func (h *Handler) ListColumns(c *gin.Context) {
 	}
 	response.Success(c, cols)
 }
+
+func (h *Handler) ShowImportsCount(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.BadRequest(c, errors.CodeInvalidParam, "非法的批次 id")
+		return
+	}
+	count, err := h.svc.CountRecords(uint(id))
+	if err == ErrBatchNotFound {
+		response.NotFound(c, err.Error())
+		return
+	}
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	response.Success(c, count)
+}

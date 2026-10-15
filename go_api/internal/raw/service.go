@@ -58,3 +58,14 @@ func (s *Service) ListColumns(batchID uint) ([]ColumnInfo, error) {
 	}
 	return s.repo.ListColumns(batchID)
 }
+
+// CountRecords 统计某批次已入库的原始行数。
+func (s *Service) CountRecords(batchID uint) (int64, error) {
+	if _, err := s.repo.GetBatch(batchID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, ErrBatchNotFound
+		}
+		return 0, err
+	}
+	return s.repo.CountRecords(batchID)
+}

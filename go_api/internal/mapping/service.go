@@ -19,13 +19,19 @@ type SaleWriter interface {
 	ReplaceBatch(product string, batchID uint, row []sale.SaleRow) (*sale.CreateBatchResult, error)
 }
 
+// RuleStore 映射规则的存取。*Repository 隐式实现。
+type RuleStore interface {
+	Upsert(m *FieldMapping) error
+	ListByCategory(category string) ([]FieldMapping, error)
+}
+
 type Service struct {
-	repo  *Repository
+	repo  RuleStore
 	raws  RawReader
 	sales SaleWriter
 }
 
-func NewService(repo *Repository, raws RawReader, sales SaleWriter) *Service {
+func NewService(repo RuleStore, raws RawReader, sales SaleWriter) *Service {
 	return &Service{repo: repo, raws: raws, sales: sales}
 }
 
@@ -61,8 +67,24 @@ type TransformResult struct {
 
 // Transform 把某批次的原始数据翻译成标准层（sales）数据。
 // 幂等：同批次重复转换只覆盖，不翻倍（靠 sale.Service.ReplaceBatch）。
-
+// 状态流转：成功 → mapped；转换失败 → failed（尽力标记，但不覆盖真正的错误）。
 func (s *Service) Transform(batchID uint) (*TransformResult, error) {
+	res, err := s.transform(batchID)
+	if err != nil {
+		// 批次不存在就不必标记了；其它失败尽力标 failed
+		if !errors.Is(err, raw.ErrBatchNotFound) {
+			_ = s.raws.UpdateStatus(batchID, raw.StatusFailed)
+		}
+		return nil, err
+	}
+	if err := s.raws.UpdateStatus(batchID, raw.StatusMapped); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// transform 只负责核心转换，不碰批次状态。
+func (s *Service) transform(batchID uint) (*TransformResult, error) {
 	batch, err := s.raws.GetBatch(batchID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -91,7 +113,10 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 行 JSON 解析失败: %w", lineNo, err)
 		}
-		values, ignored,err := resolveRow(obj, rules)
+		values, ignored, err := resolveRow(obj, rules)
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 行: %w", lineNo, err)
+		}
 		for _, col := range ignored {
 			ignoredSet[col] = struct{}{}
 		}
@@ -104,9 +129,6 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 
 	res, err := s.sales.ReplaceBatch(batch.Category, batchID, rows)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.raws.UpdateStatus(batchID, raw.StatusMapped); err != nil {
 		return nil, err
 	}
 

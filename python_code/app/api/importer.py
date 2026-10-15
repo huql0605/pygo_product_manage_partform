@@ -3,13 +3,16 @@ from fastapi import APIRouter,File,Form,HTTPException,UploadFile
 
 from app.modules.importer.csv_reader import CsvReader
 
+from app.modules.importer.excel_reader import ExcelReader
 from app.modules.importer.service import ImporterFailedError,ImporterService
 
 
 router = APIRouter()
 
 READERS ={
-    ".csv":CsvReader
+    ".csv":CsvReader,
+    ".xls":ExcelReader,
+    ".xlsx":ExcelReader
 }
 
 @router.post("/upload")
