@@ -11,6 +11,7 @@ import (
 	"github.com/huql0605/go_api/internal/product"
 	"github.com/huql0605/go_api/internal/raw"
 	"github.com/huql0605/go_api/internal/sale"
+	"github.com/huql0605/go_api/internal/summary"
 	"gorm.io/gorm"
 )
 
@@ -32,11 +33,15 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	mappingRepo := mapping.NewRepository(db)
 	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc)
 
+	summaryRepo := summary.NewRepository(db)
+	summarySvc := summary.NewService(summaryRepo)
+
 	mh := mapping.NewHandler(mappingSvc)
 	rh := raw.NewHandler(rawSvc)
 	sh := sale.NewHandler(salesvc)
 	ph := product.NewHandler(svc)
 	ah := analytics.NewHandler(pyClient)
+	smh := summary.NewHandler(summarySvc)
 
 	// 顺序很重要：先生成/取出 RequestID，Logger 才能打出来。
 	r.Use(middleware.RequestID())
@@ -54,6 +59,8 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.GET("/api/imports/:id", rh.ShowImportsCount)
 	r.POST("/api/mappings", mh.Upsert)
 	r.GET("/api/mappings", mh.List)
+	r.POST("/api/summary/refresh", smh.Refresh)
+	r.GET("/api/summary/verify", smh.Verify)
 	r.GET("/api/analytics/sales", ah.Sales)
 	r.GET("/api/analytics/top-products", ah.TopProducts)
 	r.GET("/api/analytics/brands", ah.Brands)
@@ -66,6 +73,7 @@ func MustMigrate(db *gorm.DB) {
 		&product.Product{}, &sale.Sales{},
 		&raw.ImportBatch{}, &raw.RawRecord{},
 		&mapping.FieldMapping{},
+		&summary.SalesSummary{},
 	); err != nil {
 		log.Fatalf("migrate failed: %v", err)
 	}

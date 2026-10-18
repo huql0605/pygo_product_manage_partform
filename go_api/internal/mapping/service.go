@@ -6,6 +6,7 @@ import (
 
 	"github.com/huql0605/go_api/internal/raw"
 	"github.com/huql0605/go_api/internal/sale"
+	"github.com/huql0605/go_api/internal/summary"
 	"gorm.io/gorm"
 )
 
@@ -25,14 +26,24 @@ type RuleStore interface {
 	ListByCategory(category string) ([]FieldMapping, error)
 }
 
+type SummaryRefresher interface {
+	Refresh() (*summary.RefreshResult, error)
+}
+
 type Service struct {
-	repo  RuleStore
-	raws  RawReader
-	sales SaleWriter
+	repo    RuleStore
+	raws    RawReader
+	sales   SaleWriter
+	summary SummaryRefresher
 }
 
 func NewService(repo RuleStore, raws RawReader, sales SaleWriter) *Service {
 	return &Service{repo: repo, raws: raws, sales: sales}
+}
+
+func (s *Service) WithSummary(r SummaryRefresher) *Service {
+	s.summary = r
+	return s
 }
 
 // Upsert 校验并保存一条映射规则。
@@ -59,10 +70,12 @@ func (s *Service) ListByCategory(category string) ([]FieldMapping, error) {
 }
 
 type TransformResult struct {
-	BatchID        uint     `json:"batch_id"`
-	Product        string   `json:"product"`
-	Inserted       int      `json:"inserted"`
-	IgnoredColumns []string `json:"ignored_columns"`
+	BatchID          uint     `json:"batch_id"`
+	Product          string   `json:"product"`
+	Inserted         int      `json:"inserted"`
+	IgnoredColumns   []string `json:"ignored_columns"`
+	SummaryRefreshed bool     `json:"summary_refreshed"`
+	SummaryError     string   `json:"summary_error,omitempty"`
 }
 
 // Transform 把某批次的原始数据翻译成标准层（sales）数据。
@@ -78,6 +91,11 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 		return nil, err
 	}
 	if err := s.raws.UpdateStatus(batchID, raw.StatusMapped); err != nil {
+		if _, err := s.summary.Refresh(); err != nil {
+			res.SummaryError = err.Error()
+		} else {
+			res.SummaryRefreshed = true
+		}
 		return nil, err
 	}
 	return res, nil

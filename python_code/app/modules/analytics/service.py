@@ -13,12 +13,12 @@ def get_sales_summary(start_month : str | None = None , end_month :str | None = 
 
     sql = f"""
         SELECT
-            COUNT(DISTINCT productor)      AS brand_count,
-            COUNT(DISTINCT name)           AS product_count,
-            COALESCE(SUM(sales), 0)        AS total_sales,
-            COALESCE(SUM(price * sales),0) AS total_amount,
-            COALESCE(AVG(price), 0)        AS avg_price
-        FROM sales
+            COUNT(DISTINCT productor)                                 AS brand_count,
+            COUNT(DISTINCT name)                                      AS product_count,
+            COALESCE(SUM(total_sales), 0)                             AS total_sales,
+            COALESCE(SUM(total_amount),0)                             AS total_amount,
+            COALESCE(SUM(price_sum) / NULLIF(SUM(record_count),0), 0) AS avg_price
+        FROM dws_sales
         {where_sql}
     """
     df = pd.read_sql(sql,engine,params=params)
@@ -38,10 +38,10 @@ def get_brand_ranking(limit:int = 5)->list[dict]:
     sql = """
     SELECT
         productor                 AS brand,
-        SUM(sales)                AS total_sales,
-        SUM(price * sales)        AS total_amount,
+        SUM(total_sales)          AS total_sales,
+        SUM(total_amount)         AS total_amount,
         COUNT(DISTINCT name)      AS product_count
-    FROM sales
+    FROM dws_sales
     GROUP BY productor
     ORDER BY total_sales DESC
     LIMIT %(limit)s
@@ -52,12 +52,12 @@ def get_brand_ranking(limit:int = 5)->list[dict]:
 def get_top_products(limit : int =5) ->list[dict]:
     sql = """
         SELECT
-            productor                 AS brand,
+            productor                                    AS brand,
             name,
-            SUM(sales)                AS total_sales,
-            SUM(price * sales)        AS total_amount,
-            AVG(price)                AS avg_price
-        FROM sales
+            SUM(total_sales)                             AS total_sales,
+            SUM(total_amount)                            AS total_amount,
+            SUM(price_sum) / NULLIF(SUM(record_count),0) AS avg_price
+        FROM dws_sales
         GROUP BY productor, name
         ORDER BY total_sales DESC
         LIMIT %(limit)s
@@ -68,8 +68,8 @@ def get_top_products(limit : int =5) ->list[dict]:
 def get_monthly_trend(productor : str |None = None) -> list[dict]:
     if productor:
         sql="""
-            SELECT month ,SUM(sales) AS total_sales , SUM(price * sales) AS total_amount
-            FROM sales
+            SELECT month ,SUM(total_sales) AS total_sales , SUM(total_amount) AS total_amount
+            FROM dws_sales
             WHERE productor = %(productor)s
             GROUP BY month 
             ORDER BY month
@@ -78,8 +78,8 @@ def get_monthly_trend(productor : str |None = None) -> list[dict]:
 
     else:
         sql="""
-            SELECT month,SUM(sales) AS total_sales , SUM(price * sales) AS total_amount
-            FROM sales
+            SELECT month,SUM(total_sales) AS total_sales , SUM(total_amount) AS total_amount
+            FROM dws_sales
             GROUP BY month
             ORDER BY month
         """
