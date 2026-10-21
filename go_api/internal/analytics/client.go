@@ -80,7 +80,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return fmt.Errorf("%w: %s", ErrUpstreamNotFound, strings.TrimSpace(string(body)))
 	}
-	
+
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("python returned %d", resp.StatusCode)
 	}
@@ -116,6 +116,7 @@ func (c *Client) Brands(ctx context.Context, limit int, f Filter) ([]map[string]
 	q := url.Values{}
 	f.apply(q)
 	q.Set("limit", strconv.Itoa(limit))
+	q.Set("category", f.Category)
 	var out []map[string]any
 	if err := c.get(ctx, "/analytics/brands", q, &out); err != nil {
 		return nil, err

@@ -22,7 +22,7 @@ def _filters(category=None,productor=None,start_month=None,end_month=None) :
     where , params = [] , {}
 
     product_id = _resolve_category(category=category)
-    if product_id is None:
+    if product_id is not None:
         where.append("product_id = %(product_id)s")
         params["product_id"]= product_id
     if productor :
