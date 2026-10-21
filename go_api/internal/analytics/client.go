@@ -3,9 +3,13 @@ package analytics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/huql0605/go_api/internal/common/requestid"
@@ -22,6 +26,30 @@ func NewClient(baseURL string) *Client {
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+	}
+}
+
+var ErrUpstreamNotFound = errors.New("upstream 404")
+
+type Filter struct {
+	Category   string
+	Productor  string
+	StartMonth string
+	EndMonth   string
+}
+
+func (f Filter) apply(q url.Values) {
+	if f.Category != "" {
+		q.Set("category", f.Category)
+	}
+	if f.Productor != "" {
+		q.Set("productor", f.Productor)
+	}
+	if f.StartMonth != "" {
+		q.Set("start_month", f.StartMonth)
+	}
+	if f.EndMonth != "" {
+		q.Set("end_month", f.EndMonth)
 	}
 }
 
@@ -48,25 +76,23 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("%w: %s", ErrUpstreamNotFound, strings.TrimSpace(string(body)))
+	}
+	
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("python returned %d", resp.StatusCode)
 	}
-
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("decode: %w", err)
 	}
 	return nil
 }
 
-func (c *Client) Sales(ctx context.Context, startMonth, endMonth string) (map[string]any, error) {
+func (c *Client) Sales(ctx context.Context, f Filter) (map[string]any, error) {
 	q := url.Values{}
-	if startMonth!=""{
-		q.Set("start_month",startMonth)
-	}
-	if endMonth!=""{
-		q.Set("end_month",endMonth)
-	}
-
+	f.apply(q)
 	var out map[string]any
 	if err := c.get(ctx, "/analytics/sales", q, &out); err != nil {
 		return nil, err
@@ -74,9 +100,10 @@ func (c *Client) Sales(ctx context.Context, startMonth, endMonth string) (map[st
 	return out, nil
 }
 
-func (c *Client) TopProducts(ctx context.Context, limit int) ([]map[string]any, error) {
+func (c *Client) TopProducts(ctx context.Context, limit int, f Filter) ([]map[string]any, error) {
 	q := url.Values{}
-	q.Set("limit", fmt.Sprintf("%d", limit))
+	f.apply(q)
+	q.Set("limit", strconv.Itoa(limit))
 
 	var out []map[string]any
 	if err := c.get(ctx, "/analytics/top-products", q, &out); err != nil {
@@ -85,9 +112,10 @@ func (c *Client) TopProducts(ctx context.Context, limit int) ([]map[string]any, 
 	return out, nil
 }
 
-func (c *Client) Brands(ctx context.Context, limit int) ([]map[string]any, error) {
+func (c *Client) Brands(ctx context.Context, limit int, f Filter) ([]map[string]any, error) {
 	q := url.Values{}
-	q.Set("limit", fmt.Sprintf("%d", limit))
+	f.apply(q)
+	q.Set("limit", strconv.Itoa(limit))
 	var out []map[string]any
 	if err := c.get(ctx, "/analytics/brands", q, &out); err != nil {
 		return nil, err
@@ -95,11 +123,9 @@ func (c *Client) Brands(ctx context.Context, limit int) ([]map[string]any, error
 	return out, nil
 }
 
-func (c *Client) MonthlyTrend(ctx context.Context, productor string) ([]map[string]any, error) {
+func (c *Client) MonthlyTrend(ctx context.Context, f Filter) ([]map[string]any, error) {
 	q := url.Values{}
-	if productor != "" {
-		q.Set("productor", productor)
-	}
+	f.apply(q)
 	var out []map[string]any
 	if err := c.get(ctx, "/analytics/monthly-trend", q, &out); err != nil {
 		return nil, err

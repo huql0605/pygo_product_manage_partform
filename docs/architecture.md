@@ -246,10 +246,10 @@ dws_sales: (product_id, productor, name, month)
 
 | 度量 | 类型 | 能否跨行 SUM |
 |---|---|---|
-| `total_sales = SUM(sales)` | 可加 | ✅ |
-| `total_amount = SUM(price * sales)` | 可加 | ✅ |
-| `min_price / max_price` | 可加 | ✅（可再 MIN/MAX） |
-| **`avg_price`** | **不可加** | ❌ `AVG(AVG(x)) ≠ AVG(x)` |
+| `total_sales = SUM(sales)` | 可加 | 是 |
+| `total_amount = SUM(price * sales)` | 可加 | 是 |
+| `min_price / max_price` | 可加 | 是（可再 MIN/MAX） |
+| **`avg_price`** | **不可加** | 否，`AVG(AVG(x)) ≠ AVG(x)` |
 
 所以表里**不存 `avg_price`**，而是存分子分母：
 
@@ -294,7 +294,7 @@ SELECT DISTINCT product_id, productor, name, month
 FROM sales WHERE batch_id = ANY($1);
 ```
 
-> ⚠️ 关键陷阱：同一个 `(品牌, 机型, 月份)` 可能由**多个批次**共同贡献，因此必须从**整个 `sales`** 重算这些 grain，而不能只重算该批次的行。
+> **关键陷阱**：同一个 `(品牌, 机型, 月份)` 可能由**多个批次**共同贡献，因此必须从**整个 `sales`** 重算这些 grain，而不能只重算该批次的行。
 
 **触发时机**：
 

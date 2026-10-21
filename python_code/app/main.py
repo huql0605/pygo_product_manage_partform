@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from app.modules.analytics.service import CategoryNotFoundError
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.api import importer
 from app.api import analytics
@@ -16,7 +18,13 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["X-Request-ID"] = rid
         return response
-
+    
+@app.exception_handler(CategoryNotFoundError)
+async def _category_not_found(request,exc):
+    return JSONResponse(
+        status_code=404,
+        content={"code":404,"msg":str(exc),"data":None}
+    )
 
 app.add_middleware(RequestIDMiddleware)
 

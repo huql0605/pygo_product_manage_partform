@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	stdErrors "errors"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -16,11 +17,23 @@ func NewHandler(client *Client) *Handler {
 	return &Handler{client: client}
 }
 
+func filterFrom(c *gin.Context) Filter {
+	return Filter{
+		Category:   c.Query("category"),
+		Productor:  c.Query("productor"),
+		StartMonth: c.Query("start_month"),
+		EndMonth:   c.Query("end_month"),
+	}
+}
+
 func (h *Handler) Sales(c *gin.Context) {
-	startMonth := c.Query("start_month")
-	endMonth := c.Query("end_month")
-	data, err := h.client.Sales(c.Request.Context(), startMonth, endMonth)
+	f := filterFrom(c)
+	data, err := h.client.Sales(c.Request.Context(), f)
 	if err != nil {
+		if stdErrors.Is(err, ErrUpstreamNotFound) {
+			response.NotFound(c, err.Error())
+			return
+		}
 		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
@@ -33,8 +46,13 @@ func (h *Handler) TopProducts(c *gin.Context) {
 	if err != nil || limit <= 0 {
 		limit = 5
 	}
-	data, err := h.client.TopProducts(c.Request.Context(), limit)
+	f := filterFrom(c)
+	data, err := h.client.TopProducts(c.Request.Context(), limit, f)
 	if err != nil {
+		if stdErrors.Is(err, ErrUpstreamNotFound) {
+			response.NotFound(c, err.Error())
+			return
+		}
 		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
@@ -46,8 +64,13 @@ func (h *Handler) Brands(c *gin.Context) {
 	if err != nil || limit <= 0 {
 		limit = 5
 	}
-	data, err := h.client.Brands(c.Request.Context(), limit)
+	f := filterFrom(c)
+	data, err := h.client.Brands(c.Request.Context(), limit, f)
 	if err != nil {
+		if stdErrors.Is(err, ErrUpstreamNotFound) {
+			response.NotFound(c, err.Error())
+			return
+		}
 		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
@@ -55,9 +78,13 @@ func (h *Handler) Brands(c *gin.Context) {
 }
 
 func (h *Handler) MonthlyTrend(c *gin.Context) {
-	productor := c.Query("productor")
-	data, err := h.client.MonthlyTrend(c.Request.Context(), productor)
+	f := filterFrom(c)
+	data, err := h.client.MonthlyTrend(c.Request.Context(), f)
 	if err != nil {
+		if stdErrors.Is(err, ErrUpstreamNotFound) {
+			response.NotFound(c, err.Error())
+			return
+		}
 		response.BadGateway(c, errors.CodePythonDown, err.Error())
 		return
 	}
