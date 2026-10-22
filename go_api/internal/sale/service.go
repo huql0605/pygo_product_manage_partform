@@ -1,6 +1,7 @@
 package sale
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 )
@@ -32,6 +33,13 @@ func (s *Service) buildItems(productID uint, batchID *uint, rows []SaleRow) ([]S
 		if !monthRe.MatchString(row.Month) {
 			return nil, fmt.Errorf("第 %d 行月份格式错误： %q (需要 YYYY-MM)", i+1, row.Month)
 		}
+		attrs, err := json.Marshal(row.Attrs)
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 行附加属性格式错误: %w", i+1, err)
+		}
+		if len(row.Attrs) == 0 {
+			attrs = []byte("{}")
+		}
 		items = append(items, Sales{
 			ProductID: productID,
 			BatchID:   batchID,
@@ -40,6 +48,7 @@ func (s *Service) buildItems(productID uint, batchID *uint, rows []SaleRow) ([]S
 			Price:     row.Price,
 			Sales:     row.Sales,
 			Month:     row.Month,
+			Attrs:     json.RawMessage(attrs),
 		})
 	}
 	return items, nil
@@ -61,16 +70,16 @@ func (s *Service) CreateBatch(product string, batchID *uint, rows []SaleRow) (*C
 }
 
 func (s *Service) ReplaceBatch(product string, batchID uint, rows []SaleRow) (*CreateBatchResult, error) {
-    productID, err := s.products.FindIDByName(product)
-    if err != nil {
-        return nil, fmt.Errorf("品类 %q 不存在，请先创建商品", product)
-    }
-    items, err := s.buildItems(productID, &batchID, rows)
-    if err != nil {
-        return nil, err
-    }
-    if err := s.repo.ReplaceBatch(batchID, items); err != nil {
-        return nil, err
-    }
-    return &CreateBatchResult{ProductID: productID, BatchID: &batchID, Inserted: len(items)}, nil
+	productID, err := s.products.FindIDByName(product)
+	if err != nil {
+		return nil, fmt.Errorf("品类 %q 不存在，请先创建商品", product)
+	}
+	items, err := s.buildItems(productID, &batchID, rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.ReplaceBatch(batchID, items); err != nil {
+		return nil, err
+	}
+	return &CreateBatchResult{ProductID: productID, BatchID: &batchID, Inserted: len(items)}, nil
 }

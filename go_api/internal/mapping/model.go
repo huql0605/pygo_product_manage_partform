@@ -6,6 +6,10 @@ import "time"
 // 映射规则只能把用户列名翻译成这些字段，防止写错列。
 var StandardFields = []string{"productor", "name", "price", "sales", "month"}
 
+// RequiredFields 转换时必须有值的字段。标准字段可以只进白名单不进这里，
+// 那样它就是可选字段，缺失不会导致整批失败。
+var RequiredFields = []string{"productor", "name", "price", "sales", "month"}
+
 func IsStandardField(f string) bool {
 	for _, s := range StandardFields {
 		if s == f {

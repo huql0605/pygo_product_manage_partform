@@ -69,7 +69,7 @@ func valueToString(v any) string {
 }
 
 func buildRow(values map[string]string, lineNo int) (*sale.SaleRow, error) {
-	for _, f := range StandardFields {
+	for _, f := range RequiredFields {
 		v, ok := values[f]
 		if !ok {
 			return nil, fmt.Errorf("第 %d 行找不到字段 %q 的来源列", lineNo, f)

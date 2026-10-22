@@ -73,7 +73,7 @@ type TransformResult struct {
 	BatchID          uint     `json:"batch_id"`
 	Product          string   `json:"product"`
 	Inserted         int      `json:"inserted"`
-	IgnoredColumns   []string `json:"ignored_columns"`
+	IgnoredColumns   []string `json:"ignored_columns"` // ExtraColumns 未映射到标准字段的列，但值已写入 sales.attrs，数据未丢弃。
 	SummaryRefreshed bool     `json:"summary_refreshed"`
 	SummaryError     string   `json:"summary_error,omitempty"`
 }
@@ -91,12 +91,14 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 		return nil, err
 	}
 	if err := s.raws.UpdateStatus(batchID, raw.StatusMapped); err != nil {
+		return nil, err
+	}
+	if s.summary != nil {
 		if _, err := s.summary.Refresh(); err != nil {
 			res.SummaryError = err.Error()
 		} else {
 			res.SummaryRefreshed = true
 		}
-		return nil, err
 	}
 	return res, nil
 }
@@ -135,13 +137,20 @@ func (s *Service) transform(batchID uint) (*TransformResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 行: %w", lineNo, err)
 		}
+
 		for _, col := range ignored {
 			ignoredSet[col] = struct{}{}
+		}
+
+		attrs := make(map[string]string, len(ignored))
+		for _, col := range ignored {
+			attrs[col] = valueToString(obj[col])
 		}
 		row, err := buildRow(values, lineNo)
 		if err != nil {
 			return nil, err
 		}
+		row.Attrs = attrs
 		rows = append(rows, *row)
 	}
 

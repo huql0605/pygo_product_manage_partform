@@ -30,11 +30,11 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	rawRepo := raw.NewRepository(db)
 	rawSvc := raw.NewService(rawRepo)
 
-	mappingRepo := mapping.NewRepository(db)
-	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc)
-
 	summaryRepo := summary.NewRepository(db)
 	summarySvc := summary.NewService(summaryRepo)
+
+	mappingRepo := mapping.NewRepository(db)
+	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc).WithSummary(summarySvc)
 
 	mh := mapping.NewHandler(mappingSvc)
 	rh := raw.NewHandler(rawSvc)

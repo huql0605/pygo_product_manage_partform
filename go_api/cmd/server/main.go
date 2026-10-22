@@ -23,6 +23,8 @@ func main() {
 	}
 
 	router.MustMigrate(db)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sales_attrs
+         ON sales USING gin (attrs jsonb_path_ops)`)
 	r := router.New(db, cfg)
 	addr := ":" + strconv.Itoa(cfg.Server.Port)
 	log.Printf("go api listen on %s", addr)
