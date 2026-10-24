@@ -3,7 +3,8 @@ server:
 database:
   host: localhost
   port: 5432
-  user: leohu
+  # 数据库用户名与密码不要写在本文件：请通过 .env 的 DB_USER / DB_PASSWORD 注入
+  user: change_me
   password: ""
   dbname: db1
   sslmode: disable

@@ -90,3 +90,33 @@ func (h *Handler) MonthlyTrend(c *gin.Context) {
 	}
 	response.Success(c, data)
 }
+
+// Attributes 属性聚合。key 必须命中 Python 侧的属性白名单，
+// 未登记的 key 会被拒绝，避免开放任意字段的扫描面。
+func (h *Handler) Attributes(c *gin.Context) {
+	key := c.Query("key")
+	if key == "" {
+		response.BadRequest(c, errors.CodeInvalidParam, "缺少 key 参数")
+		return
+	}
+
+	limit, err := strconv.Atoi(c.Query("limit"))
+	if err != nil || limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	f := filterFrom(c)
+	data, err := h.client.Attributes(c.Request.Context(), key, limit, f)
+	if err != nil {
+		if stdErrors.Is(err, ErrUpstreamNotFound) {
+			response.NotFound(c, err.Error())
+			return
+		}
+		response.BadGateway(c, errors.CodePythonDown, err.Error())
+		return
+	}
+	response.Success(c, data)
+}

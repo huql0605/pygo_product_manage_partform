@@ -13,6 +13,20 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Python virtualenv 与打包产物
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# 运行日志与本地二进制
+*.log
+go_api/bin/
+go_api/server
+
 # Test binary, built with `go test -c`
 *.test
 

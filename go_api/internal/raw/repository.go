@@ -60,3 +60,49 @@ func (r *Repository) CountRecords(batchID uint) (int64, error) {
 	err := r.db.Model(&RawRecord{}).Where("batch_id = ?", batchID).Count(&count).Error
 	return count, err
 }
+
+// ListBatches 按品类 / 状态筛选批次，返回当前页与总数。
+func (r *Repository) ListBatches(category, status string, offset, limit int) ([]ImportBatch, int64, error) {
+	// 每次重新构造查询，避免 Count 之后复用同一条语句带来的状态污染
+	base := func() *gorm.DB {
+		q := r.db.Model(&ImportBatch{})
+		if category != "" {
+			q = q.Where("category = ?", category)
+		}
+		if status != "" {
+			q = q.Where("status = ?", status)
+		}
+		return q
+	}
+
+	var total int64
+	if err := base().Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	out := make([]ImportBatch, 0, limit)
+	err := base().Order("id DESC").Offset(offset).Limit(limit).Find(&out).Error
+	return out, total, err
+}
+
+// PurgeBatch 在一个事务里删除批次及其全部衍生数据：
+// sales 明细行（batch_id 指向它）、raw_records、import_batches。
+//
+// 这里直接写 sales 表名，是因为跨层删除必须落在同一个事务里；
+// 若拆成两个 repository 调用，中途失败会留下"明细已删、原始数据还在"的脏状态。
+func (r *Repository) PurgeBatch(id uint) (int64, error) {
+	var deletedSales int64
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Exec("DELETE FROM sales WHERE batch_id = ?", id)
+		if res.Error != nil {
+			return res.Error
+		}
+		deletedSales = res.RowsAffected
+
+		if err := tx.Where("batch_id = ?", id).Delete(&RawRecord{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&ImportBatch{}, id).Error
+	})
+	return deletedSales, err
+}

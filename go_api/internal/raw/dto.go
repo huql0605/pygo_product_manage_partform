@@ -20,3 +20,20 @@ func (r *CreateImportReq) Validate() error {
 	}
 	return nil
 }
+
+// ListImportsResult 批次列表的分页结果。
+type ListImportsResult struct {
+	Items []ImportBatch `json:"items"`
+	Total int64         `json:"total"`
+	Page  int           `json:"page"`
+	Size  int           `json:"size"`
+}
+
+// DeleteImportResult 删除批次的结果。删除会同时清掉该批次的明细行，
+// 并重建汇总层，因此需要把这两步的结果回报给调用方。
+type DeleteImportResult struct {
+	BatchID          uint   `json:"batch_id"`
+	DeletedSales     int64  `json:"deleted_sales"`
+	SummaryRefreshed bool   `json:"summary_refreshed"`
+	SummaryError     string `json:"summary_error,omitempty"`
+}

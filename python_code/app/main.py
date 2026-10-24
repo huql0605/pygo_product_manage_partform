@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from app.modules.analytics.service import CategoryNotFoundError
+from app.modules.analytics.service import AttributeNotAllowedError, CategoryNotFoundError
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.api import importer
 from app.api import analytics
@@ -24,6 +24,13 @@ async def _category_not_found(request,exc):
     return JSONResponse(
         status_code=404,
         content={"code":404,"msg":str(exc),"data":None}
+    )
+
+@app.exception_handler(AttributeNotAllowedError)
+async def _attribute_not_allowed(request,exc):
+    return JSONResponse(
+        status_code=400,
+        content={"code":400,"msg":str(exc),"data":None}
     )
 
 app.add_middleware(RequestIDMiddleware)

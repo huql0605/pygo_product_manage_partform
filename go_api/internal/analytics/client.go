@@ -116,7 +116,7 @@ func (c *Client) Brands(ctx context.Context, limit int, f Filter) ([]map[string]
 	q := url.Values{}
 	f.apply(q)
 	q.Set("limit", strconv.Itoa(limit))
-	q.Set("category", f.Category)
+
 	var out []map[string]any
 	if err := c.get(ctx, "/analytics/brands", q, &out); err != nil {
 		return nil, err
@@ -127,8 +127,24 @@ func (c *Client) Brands(ctx context.Context, limit int, f Filter) ([]map[string]
 func (c *Client) MonthlyTrend(ctx context.Context, f Filter) ([]map[string]any, error) {
 	q := url.Values{}
 	f.apply(q)
+
 	var out []map[string]any
 	if err := c.get(ctx, "/analytics/monthly-trend", q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Attributes 按任意已登记属性做分组聚合。走 sales 明细而不是 dws_sales，
+// 属于探索口径，不与确认口径混用。
+func (c *Client) Attributes(ctx context.Context, key string, limit int, f Filter) (map[string]any, error) {
+	q := url.Values{}
+	f.apply(q)
+	q.Set("key", key)
+	q.Set("limit", strconv.Itoa(limit))
+
+	var out map[string]any
+	if err := c.get(ctx, "/analytics/attributes", q, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

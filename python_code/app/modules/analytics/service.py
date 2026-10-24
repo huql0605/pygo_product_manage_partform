@@ -1,4 +1,8 @@
+import re
+
 import pandas as pd
+
+from app.config import settings
 from app.db import engine
 
 class CategoryNotFoundError(LookupError):
@@ -38,8 +42,8 @@ def _filters(category=None,productor=None,start_month=None,end_month=None) :
     where_sql =f"WHERE {' AND '.join(where)}" if where else ""
     return where_sql,params
 
-def get_sales_summary(start_month : str | None = None , end_month :str | None = None,category = None) ->dict:
-    where_sql,params = _filters(category=category,start_month=start_month,end_month=end_month)
+def get_sales_summary(start_month : str | None = None , end_month :str | None = None,category = None,productor : str | None = None) ->dict:
+    where_sql,params = _filters(category=category,productor=productor,start_month=start_month,end_month=end_month)
 
     sql = f"""
         SELECT
@@ -64,8 +68,8 @@ def get_sales_summary(start_month : str | None = None , end_month :str | None = 
     }
 
 
-def get_brand_ranking(limit:int = 5,category:str | None = None)->list[dict]:
-    where_sql , params =_filters(category=category)
+def get_brand_ranking(limit:int = 5,category:str | None = None,start_month:str | None = None,end_month:str | None = None,productor:str | None = None)->list[dict]:
+    where_sql , params =_filters(category=category,productor=productor,start_month=start_month,end_month=end_month)
     params["limit"]=limit
     sql = f"""
         SELECT productor              AS brand,
@@ -80,8 +84,8 @@ def get_brand_ranking(limit:int = 5,category:str | None = None)->list[dict]:
     """
     return pd.read_sql(sql, engine, params=params).to_dict(orient="records")
 
-def get_top_products(limit: int = 5, category: str | None = None):
-    where_sql, params = _filters(category=category)
+def get_top_products(limit: int = 5, category: str | None = None, start_month: str | None = None, end_month: str | None = None, productor: str | None = None):
+    where_sql, params = _filters(category=category, productor=productor, start_month=start_month, end_month=end_month)
     params["limit"] = limit
     sql = f"""
         SELECT productor AS brand,
@@ -98,8 +102,8 @@ def get_top_products(limit: int = 5, category: str | None = None):
     return pd.read_sql(sql, engine, params=params).to_dict(orient="records")
 
 
-def get_monthly_trend(productor: str | None = None, category: str | None = None):
-    where_sql, params = _filters(category=category, productor=productor)
+def get_monthly_trend(productor: str | None = None, category: str | None = None, start_month: str | None = None, end_month: str | None = None):
+    where_sql, params = _filters(category=category, productor=productor, start_month=start_month, end_month=end_month)
     sql = f"""
         SELECT month,
                SUM(total_sales)  AS total_sales,
@@ -110,4 +114,93 @@ def get_monthly_trend(productor: str | None = None, category: str | None = None)
         ORDER BY month
     """
     return pd.read_sql(sql, engine, params=params).to_dict(orient="records")
+
+
+# ---------- 属性聚合（探索口径） ----------
+
+_KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+
+
+class AttributeNotAllowedError(LookupError):
+    """请求的属性不在白名单内。属性聚合不接受任意 key，避免开放式扫描。"""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"未登记的属性: {key!r}")
+
+
+def _allowed_attr_keys() -> tuple[bool, set[str]]:
+    """返回 (是否放行任意 key, 允许的 key 集合)。
+
+    ALLOWED_ATTRS 设为 * 表示放行任意符合命名规则的 key。
+    """
+    raw = (settings.allowed_attrs or "").strip()
+    if raw == "*":
+        return True, set()
+    return False, {k.strip() for k in raw.split(",") if k.strip()}
+
+
+def _check_attr_key(key: str | None) -> str:
+    key = (key or "").strip()
+    if not _KEY_RE.fullmatch(key):
+        raise AttributeNotAllowedError(key)
+    wildcard, allowed = _allowed_attr_keys()
+    if not wildcard and key not in allowed:
+        raise AttributeNotAllowedError(key)
+    return key
+
+
+def get_attribute_breakdown(
+    key: str,
+    limit: int = 20,
+    category: str | None = None,
+    start_month: str | None = None,
+    end_month: str | None = None,
+) -> dict:
+    """按某个属性分组统计销量与金额。
+
+    与 /analytics/* 的区别：
+    - 数据源是 sales 明细，不是 dws_sales
+    - 属于探索口径，属性没有被纳入汇总层粒度
+    - key 必须命中白名单，分组维度只有属性本身
+    """
+    key = _check_attr_key(key)
+
+    where_sql, params = _filters(
+        category=category, start_month=start_month, end_month=end_month
+    )
+    conditions = ["attrs ? %(key)s"]
+    if where_sql:
+        conditions.append(where_sql.removeprefix("WHERE "))
+    where_clause = "WHERE " + " AND ".join(conditions)
+
+    params["key"] = key
+    params["limit"] = limit
+
+    sql = f"""
+        SELECT COALESCE(attrs->>%(key)s, '(未标注)') AS value,
+               COALESCE(SUM(sales), 0)               AS total_sales,
+               COALESCE(SUM(price * sales), 0)       AS total_amount,
+               COUNT(*)                              AS record_count
+        FROM sales
+        {where_clause}
+        GROUP BY 1
+        ORDER BY total_sales DESC
+        LIMIT %(limit)s
+    """
+    df = pd.read_sql(sql, engine, params=params)
+
+    items = df.to_dict(orient="records")
+    for item in items:
+        item["total_sales"] = int(item["total_sales"])
+        item["total_amount"] = round(float(item["total_amount"]), 2)
+        item["record_count"] = int(item["record_count"])
+
+    return {
+        "key": key,
+        "category": category,
+        "start_month": start_month,
+        "end_month": end_month,
+        "items": items,
+    }
 

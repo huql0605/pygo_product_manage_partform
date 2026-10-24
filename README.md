@@ -9,6 +9,42 @@ cd python_code
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
+## 首次启动
+
+```bash
+# 1. 准备环境变量（示例文件不含真实密码）
+cp go_api/.env.example go_api/.env
+cp python_code/.env.example python_code/.env
+# 编辑两个 .env，填入实际的数据库连接串
+
+# 2. 建库（只需一次）
+createdb db1
+
+# 3. 启动 Go，AutoMigrate 会自动建表并补齐 attrs 的 GIN 索引
+cd go_api && go run ./cmd/server
+
+# 4. 另开终端启动 Python
+cd python_code && uv run uvicorn app.main:app --reload --port 8000
+
+# 5. 冒烟验证：服务在线、数据非空、汇总一致、品类过滤生效
+bash scripts/smoke.sh
+```
+
+## 测试
+
+```bash
+# Go：无数据库时自动跳过集成测试
+cd go_api && go test ./...
+
+# Go 集成测试（需要一个库名含 test 的独立数据库，避免误删开发数据）
+# 凭据请从 .env 或环境变量读取，不要写进文档
+TEST_DATABASE_URL='host=localhost user=<db_user> password=<db_password> dbname=db1_test port=5432 sslmode=disable' \
+  go test ./internal/summary -v
+
+# Python
+cd python_code && python -m unittest discover -s tests -v
+```
+
 ---
 
 # API 接口说明（Go 服务）
@@ -43,18 +79,21 @@ Base URL：`http://localhost:8080`
 | 2 | GET | `/api/products` | 无 |
 | 3 | POST | `/api/products` | JSON Body |
 | 4 | POST | `/api/sales/batch` | JSON Body |
-| 5 | POST | `/api/imports` | JSON Body |
-| 6 | GET | `/api/imports/:id` | Path |
-| 7 | GET | `/api/imports/:id/columns` | Path |
-| 8 | POST | `/api/imports/:id/transform` | Path |
-| 9 | GET | `/api/mappings` | Query |
-| 10 | POST | `/api/mappings` | JSON Body |
-| 11 | POST | `/api/summary/refresh` | 无 |
-| 12 | GET | `/api/summary/verify` | 无 |
-| 13 | GET | `/api/analytics/sales` | Query |
-| 14 | GET | `/api/analytics/top-products` | Query |
-| 15 | GET | `/api/analytics/brands` | Query |
-| 16 | GET | `/api/analytics/monthly-trend` | Query |
+| 5 | GET | `/api/imports` | Query |
+| 6 | POST | `/api/imports` | JSON Body |
+| 7 | GET | `/api/imports/:id` | Path |
+| 8 | GET | `/api/imports/:id/columns` | Path |
+| 9 | POST | `/api/imports/:id/transform` | Path |
+| 10 | DELETE | `/api/imports/:id` | Path |
+| 11 | GET | `/api/mappings` | Query |
+| 12 | POST | `/api/mappings` | JSON Body |
+| 13 | POST | `/api/summary/refresh` | 无 |
+| 14 | GET | `/api/summary/verify` | 无 |
+| 15 | GET | `/api/analytics/sales` | Query |
+| 16 | GET | `/api/analytics/top-products` | Query |
+| 17 | GET | `/api/analytics/brands` | Query |
+| 18 | GET | `/api/analytics/monthly-trend` | Query |
+| 19 | GET | `/api/analytics/attributes` | Query |
 
 ---
 
@@ -231,6 +270,41 @@ curl -X POST http://localhost:8080/api/imports \
 
 > 转换完成后建议显式调用 `POST /api/summary/refresh` 重建汇总层。
 
+### `GET /api/imports`
+
+分页列出批次。
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|---|---|---|---|---|
+| `category` | Query | string | 否 | 按品类过滤 |
+| `status` | Query | string | 否 | `loaded` / `mapped` / `failed` |
+| `page` | Query | integer | 否 | 页码，从 1 开始，默认 1 |
+| `size` | Query | integer | 否 | 每页条数，默认 20，上限 200 |
+
+**响应 `data`**
+
+```json
+{ "items": [ { "id": 9, "source": "computer_sales.csv", "category": "computer",
+               "status": "mapped", "row_count": 120, "created_at": "..." } ],
+  "total": 9, "page": 1, "size": 20 }
+```
+
+### `DELETE /api/imports/:id`
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|---|---|---|---|---|
+| `id` | Path | integer | 是 | 批次 id |
+
+在同一个事务内删除该批次的 `sales` 明细行、`raw_records` 与 `import_batches` 记录，随后重建汇总层。**不可撤销**，重跑需要重新上传。
+
+**响应 `data`**
+
+```json
+{ "batch_id": 9, "deleted_sales": 120, "summary_refreshed": true }
+```
+
+批次不存在 → `404 / 10002`。若汇总层重建失败，`summary_refreshed` 为 `false` 且带上 `summary_error`，此时需手动调用 `POST /api/summary/refresh`。
+
 ---
 
 ## 5. 映射层（mappings）
@@ -314,9 +388,11 @@ curl -X POST http://localhost:8080/api/mappings \
 |---|---|---|---|---|
 | `category` | string | 全部 4 个 | 否 | 品类名，如 `phone` / `computer`；不传表示全部品类；传了但品类不存在 → `404 / 10002` |
 | `limit` | integer | `top-products`、`brands` | 否 | 返回条数上限，见各自说明；解析失败或 `<= 0` 时回落为 `5` |
-| `start_month` | string | `sales` | 否 | 起始月份（含），`YYYY-MM` |
-| `end_month` | string | `sales` | 否 | 结束月份（含），`YYYY-MM` |
-| `productor` | string | `monthly-trend` | 否 | 品牌名，精确匹配 |
+| `start_month` | string | 全部 4 个 | 否 | 起始月份（含），`YYYY-MM` |
+| `end_month` | string | 全部 4 个 | 否 | 结束月份（含），`YYYY-MM` |
+| `productor` | string | 全部 4 个 | 否 | 品牌名，精确匹配 |
+
+> 时间、品类、品牌三个条件在 4 个接口上行为一致：传了才生效，不传即不加过滤条件。
 
 > 时间与品类条件均为「传了才生效」，不传即不加过滤条件。
 
@@ -405,6 +481,34 @@ curl -i 'http://localhost:8080/api/analytics/brands?category=comptuer'
 ```
 
 > `limit` 超出上限（如 `top-products?limit=1000`）会被 Python 侧的参数校验拒绝（HTTP 422），Go 侧统一按上游错误返回 `502 / 20001`。
+
+### `GET /api/analytics/attributes`
+
+按某个属性分组统计销量与金额。数据源是 `sales` 明细而不是 `dws_sales`，属于**探索口径**，与上面 4 个接口的确认口径区分。
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|---|---|---|---|---|
+| `key` | Query | string | 是 | 属性名，必须命中白名单 `ALLOWED_ATTRS` |
+| `limit` | Query | integer | 否 | 默认 20，上限 100 |
+| `category` | Query | string | 否 | 品类过滤 |
+| `start_month` | Query | string | 否 | 起始月份，`YYYY-MM` |
+| `end_month` | Query | string | 否 | 结束月份，`YYYY-MM` |
+
+**响应 `data`**
+
+```json
+{ "key": "storage", "category": "computer", "start_month": null, "end_month": null,
+  "items": [ { "value": "512G", "total_sales": 123456,
+               "total_amount": 987654321.0, "record_count": 24 } ] }
+```
+
+**白名单**：由 `python_code/.env` 的 `ALLOWED_ATTRS` 控制，默认 `storage,screen,cpu,ram,color,weight`；设为 `*` 时放行任意合法命名的 key。未登记的 key 返回 `400 / 10001`。
+
+```bash
+curl 'http://localhost:8080/api/analytics/attributes?key=storage&category=computer'
+```
+
+> 属性以字符串形式存储在 `sales.attrs` 中（例如 `{"storage": "512G"}`），数值型属性需要在 SQL 里显式转型，例如 `SUM((attrs->>'weight')::numeric)`。
 
 ---
 

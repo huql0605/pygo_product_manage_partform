@@ -35,6 +35,14 @@ python -m uvicorn app.main:app --reload
 
 There are currently no Python test or lint configuration files or test files. The API needs a reachable PostgreSQL database for analytics queries.
 
+## 凭据
+
+- 任何被 git 跟踪的文件（文档、示例配置、脚本、测试、注释）都不得出现真实的数据库用户名或密码。
+- 示例与文档里只写占位符：`change_me`、`<db_user>`、`$DB_USER`。
+- 真实值只放在 `.env`（已被 `.gitignore` 忽略）或部署环境变量中。
+- `configs/configs.yaml` 的 `database.user` / `database.password` 只是兜底默认值，运行时必须由 `DB_USER` / `DB_PASSWORD` 覆盖。
+- `.mcp.json` 的 `POSTGRES_CONNECTION_STRING` 同样只从环境变量读取。
+
 ## MCP
 
 - `.mcp.json` configures the PostgreSQL MCP server in restricted (read-only) mode. It requires `uvx` and the `POSTGRES_CONNECTION_STRING` environment variable; keep the connection string out of tracked files.

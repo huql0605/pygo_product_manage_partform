@@ -27,11 +27,12 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	salerepo := sale.NewRepository(db)
 	salesvc := sale.NewService(salerepo, repo)
 
-	rawRepo := raw.NewRepository(db)
-	rawSvc := raw.NewService(rawRepo)
-
+	// summary 要先于 raw / mapping 创建：删除批次与转换批次都需要在完成后重建汇总层。
 	summaryRepo := summary.NewRepository(db)
 	summarySvc := summary.NewService(summaryRepo)
+
+	rawRepo := raw.NewRepository(db)
+	rawSvc := raw.NewService(rawRepo).WithSummary(summarySvc)
 
 	mappingRepo := mapping.NewRepository(db)
 	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc).WithSummary(summarySvc)
@@ -53,7 +54,9 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.GET("/api/products", ph.List) //获取sales表所有商品
 	r.POST("/api/sales/batch", sh.CreateBatch)
 	r.POST("/api/products", ph.Create)
+	r.GET("/api/imports", rh.ListImports)
 	r.POST("/api/imports", rh.CreateImport)
+	r.DELETE("/api/imports/:id", rh.DeleteImport)
 	r.POST("/api/imports/:id/transform", mh.Transform)
 	r.GET("/api/imports/:id/columns", rh.ListColumns)
 	r.GET("/api/imports/:id", rh.ShowImportsCount)
@@ -65,6 +68,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.GET("/api/analytics/top-products", ah.TopProducts)
 	r.GET("/api/analytics/brands", ah.Brands)
 	r.GET("/api/analytics/monthly-trend", ah.MonthlyTrend)
+	r.GET("/api/analytics/attributes", ah.Attributes)
 	return r
 }
 
@@ -76,5 +80,13 @@ func MustMigrate(db *gorm.DB) {
 		&summary.SalesSummary{},
 	); err != nil {
 		log.Fatalf("migrate failed: %v", err)
+	}
+
+	// sales.attrs 的 GIN 索引。属性不进汇总层，聚合直接扫明细，靠它收敛扫描范围。
+	// 用 jsonb_path_ops：索引体积更小，且支持 @> 与 ? 两种操作符。
+	if err := db.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_sales_attrs ON sales USING gin (attrs jsonb_path_ops)`,
+	).Error; err != nil {
+		log.Fatalf("create attrs index failed: %v", err)
 	}
 }
