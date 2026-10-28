@@ -7,6 +7,7 @@ import (
 
 	"github.com/huql0605/go_api/internal/raw"
 	"github.com/huql0605/go_api/internal/sale"
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -103,7 +104,7 @@ func TestTransform_SuccessMarksMapped(t *testing.T) {
 	if len(fs.gotRows) != 2 {
 		t.Fatalf("写入行数 = %d, want 2", len(fs.gotRows))
 	}
-	if fs.gotRows[0].Productor != "Apple" || fs.gotRows[0].Price != 7114.41 || fs.gotRows[0].Sales != 11556 {
+	if fs.gotRows[0].Productor != "Apple" || !fs.gotRows[0].Price.Equal(decimal.RequireFromString("7114.41")) || fs.gotRows[0].Sales != 11556 {
 		t.Errorf("类型转换或取值不对: %+v", fs.gotRows[0])
 	}
 	if fs.gotBatch != 1 {
@@ -144,13 +145,13 @@ func TestTransform_AmbiguousColumns_ReportsRealError(t *testing.T) {
 	if fs.calls != 0 {
 		t.Errorf("歧义时不该写库，实际调用 ReplaceBatch %d 次", fs.calls)
 	}
-	if len(fr.statusLog) != 1 || fr.statusLog[0] != raw.StatusFailed {
-		t.Errorf("状态应流转到 failed，实际 %v", fr.statusLog)
+	if len(fr.statusLog) != 0 {
+		t.Errorf("转换失败不该改批次状态，实际写入了 %v", fr.statusLog)
 	}
 }
 
-// 守卫 BUG 2：转换失败必须把批次标成 failed，且不写库
-func TestTransform_MissingField_MarksFailed(t *testing.T) {
+// 守卫 BUG 2：转换失败必须报出缺失字段，且不写库、不改状态
+func TestTransform_MissingField_DoesNotTouchStatus(t *testing.T) {
 	rules := []FieldMapping{
 		{Category: "phone", SourceColumn: "品牌", TargetField: "productor"},
 		{Category: "phone", SourceColumn: "单价", TargetField: "price"},
@@ -173,8 +174,8 @@ func TestTransform_MissingField_MarksFailed(t *testing.T) {
 	if !strings.Contains(err.Error(), "找不到字段") {
 		t.Errorf("错误应指出缺失的字段，实际: %v", err)
 	}
-	if len(fr.statusLog) != 1 || fr.statusLog[0] != raw.StatusFailed {
-		t.Errorf("状态应流转到 failed，实际 %v", fr.statusLog)
+	if len(fr.statusLog) != 0 {
+		t.Errorf("转换失败不该改批次状态，实际写入了 %v", fr.statusLog)
 	}
 	if fs.calls != 0 {
 		t.Errorf("失败时不该写库，实际调用 %d 次", fs.calls)
@@ -200,7 +201,7 @@ func TestTransform_ExplicitRulesTranslateChineseColumns(t *testing.T) {
 
 	got := fs.gotRows[0]
 	if got.Productor != "Apple" || got.Name != "iPhone 16" ||
-		got.Price != 8000 || got.Sales != 1234 || got.Month != "2025-01" {
+		!got.Price.Equal(decimal.NewFromInt(8000)) || got.Sales != 1234 || got.Month != "2025-01" {
 		t.Errorf("中文列名翻译结果不对: %+v", got)
 	}
 }

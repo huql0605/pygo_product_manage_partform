@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/huql0605/go_api/internal/sale"
+	"github.com/shopspring/decimal"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -74,9 +75,9 @@ func TestRefreshAll_AggregatesByGrain(t *testing.T) {
 
 	b1, b2 := uint(1), uint(2)
 	seedSales(t, db,
-		sale.Sales{ProductID: 1, BatchID: &b1, Productor: "Apple", Name: "iPhone 15", Price: 100, Sales: 10, Month: "2024-01"},
-		sale.Sales{ProductID: 1, BatchID: &b2, Productor: "Apple", Name: "iPhone 15", Price: 300, Sales: 5, Month: "2024-01"},
-		sale.Sales{ProductID: 1, BatchID: &b1, Productor: "Apple", Name: "iPhone 15", Price: 200, Sales: 7, Month: "2024-02"},
+		sale.Sales{ProductID: 1, BatchID: &b1, Productor: "Apple", Name: "iPhone 15", Price: decimal.NewFromInt(100), Sales: 10, Month: "2024-01"},
+		sale.Sales{ProductID: 1, BatchID: &b2, Productor: "Apple", Name: "iPhone 15", Price: decimal.NewFromInt(300), Sales: 5, Month: "2024-01"},
+		sale.Sales{ProductID: 1, BatchID: &b1, Productor: "Apple", Name: "iPhone 15", Price: decimal.NewFromInt(200), Sales: 7, Month: "2024-02"},
 	)
 
 	n, err := repo.RefreshAll()
@@ -95,10 +96,10 @@ func TestRefreshAll_AggregatesByGrain(t *testing.T) {
 	if got.TotalSales != 15 {
 		t.Errorf("total_sales 期望 15，实际 %d", got.TotalSales)
 	}
-	if got.TotalAmount != 2500 {
+	if got.TotalAmount.Cmp(decimal.NewFromInt(2500)) != 0 {
 		t.Errorf("total_amount 期望 10*100+5*300=2500，实际 %v", got.TotalAmount)
 	}
-	if got.PriceSum != 400 {
+	if got.PriceSum.Cmp(decimal.NewFromInt(400)) != 0 {
 		t.Errorf("price_sum 期望 400，实际 %v", got.PriceSum)
 	}
 	if got.RecordCount != 2 {
@@ -107,7 +108,7 @@ func TestRefreshAll_AggregatesByGrain(t *testing.T) {
 	if got.BatchCount != 2 {
 		t.Errorf("batch_count 期望 2（两个批次），实际 %d", got.BatchCount)
 	}
-	if got.MinPrice != 100 || got.MaxPrice != 300 {
+	if got.MinPrice.Cmp(decimal.NewFromInt(100)) != 0 || got.MaxPrice.Cmp(decimal.NewFromInt(300)) != 0 {
 		t.Errorf("min/max price 期望 100/300，实际 %v/%v", got.MinPrice, got.MaxPrice)
 	}
 }
@@ -118,7 +119,7 @@ func TestRefreshAll_IsIdempotent(t *testing.T) {
 	repo := NewRepository(db)
 
 	seedSales(t, db,
-		sale.Sales{ProductID: 1, Productor: "Apple", Name: "iPhone 15", Price: 100, Sales: 10, Month: "2024-01"},
+		sale.Sales{ProductID: 1, Productor: "Apple", Name: "iPhone 15", Price: decimal.NewFromInt(100), Sales: 10, Month: "2024-01"},
 	)
 
 	first, err := repo.RefreshAll()
@@ -148,7 +149,7 @@ func TestVerify_DetectsDrift(t *testing.T) {
 	repo := NewRepository(db)
 
 	seedSales(t, db,
-		sale.Sales{ProductID: 1, Productor: "Apple", Name: "iPhone 15", Price: 100, Sales: 10, Month: "2024-01"},
+		sale.Sales{ProductID: 1, Productor: "Apple", Name: "iPhone 15", Price: decimal.NewFromInt(100), Sales: 10, Month: "2024-01"},
 	)
 	if _, err := repo.RefreshAll(); err != nil {
 		t.Fatalf("刷新失败: %v", err)

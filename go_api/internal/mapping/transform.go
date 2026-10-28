@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/huql0605/go_api/internal/sale"
+	"github.com/shopspring/decimal"
 )
 
 var monthRe = regexp.MustCompile(`^\d{4}-(0[1-9]|1[0-2])$`)
@@ -78,7 +79,7 @@ func buildRow(values map[string]string, lineNo int) (*sale.SaleRow, error) {
 			return nil, fmt.Errorf("第 %d 行字段 %q 为空", lineNo, f)
 		}
 	}
-	price, err := strconv.ParseFloat(values["price"], 64)
+	price, err := decimal.NewFromString(values["price"])
 	if err != nil {
 		return nil, fmt.Errorf("第 %d 行 price 不是数字: %q", lineNo, values["price"])
 	}

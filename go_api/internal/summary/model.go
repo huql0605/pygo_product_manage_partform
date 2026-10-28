@@ -1,6 +1,10 @@
 package summary
 
-import "time"
+import (
+	"time"
+
+	"github.com/shopspring/decimal"
+)
 
 type SalesSummary struct {
 	ID        uint   `json:"id" gorm:"primarykey"`
@@ -9,13 +13,13 @@ type SalesSummary struct {
 	Name      string `json:"name" gorm:"not null;uniqueIndex:uk_dws_grain,priority:3"`
 	Month     string `json:"month" gorm:"type:varchar(7);not null;index:idx_dws_month;uniqueIndex:uk_dws_grain,priority:4"`
 
-	TotalSales  int64   `json:"total_sales" gorm:"not null;default:0"`
-	TotalAmount float64 `json:"total_amount" gorm:"not null;default:0"`
-	PriceSum    float64 `json:"price_sum" gorm:"not null;default:0"`
-	RecordCount int     `json:"record_count" gorm:"not null;default:0"`
+	TotalSales  int64           `json:"total_sales" gorm:"not null;default:0"`
+	TotalAmount decimal.Decimal `json:"total_amount" gorm:"type:numeric(18,4);not null;default:0"`
+	PriceSum    decimal.Decimal `json:"price_sum" gorm:"type:numeric(18,4);not null;default:0"`
+	RecordCount int             `json:"record_count" gorm:"not null;default:0"`
 
-	MinPrice float64 `json:"min_price"`
-	MaxPrice float64 `json:"max_price"`
+	MinPrice decimal.Decimal `json:"min_price" gorm:"type:numeric(18,4)"`
+	MaxPrice decimal.Decimal `json:"max_price" gorm:"type:numeric(18,4)"`
 
 	BatchCount int `json:"batch_count" gorm:"not null;default:0"`
 

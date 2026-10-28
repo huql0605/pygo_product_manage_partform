@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/huql0605/go_api/internal/sale"
+	"github.com/shopspring/decimal"
 )
 
 // ---------- 测试辅助 ----------
@@ -145,12 +146,12 @@ func TestBuildRow(t *testing.T) {
 		errPart string // 错误信息应包含的片段；空表示不期望报错
 	}{
 		{
-			name:   "正常：字符串正确转成 float/int64",
+			name:   "正常：字符串正确转成 decimal/int64",
 			values: validValues,
 			lineNo: 1,
 			want: &sale.SaleRow{
 				Productor: "Apple", Name: "iPhone 15 Pro",
-				Price: 7114.41, Sales: 11556, Month: "2024-01",
+				Price: decimal.RequireFromString("7114.41"), Sales: 11556, Month: "2024-01",
 			},
 		},
 		{
@@ -207,7 +208,7 @@ func TestBuildRow(t *testing.T) {
 			lineNo: 1,
 			want: &sale.SaleRow{
 				Productor: "Apple", Name: "iPhone 15 Pro",
-				Price: 7114.41, Sales: 11556, Month: "2024-12",
+				Price: decimal.RequireFromString("7114.41"), Sales: 11556, Month: "2024-12",
 			},
 		},
 		{
@@ -216,7 +217,7 @@ func TestBuildRow(t *testing.T) {
 			lineNo: 1,
 			want: &sale.SaleRow{
 				Productor: "Apple", Name: "iPhone 15 Pro",
-				Price: 7114.41, Sales: 11556, Month: "2024-01",
+				Price: decimal.RequireFromString("7114.41"), Sales: 11556, Month: "2024-01",
 			},
 		},
 	}

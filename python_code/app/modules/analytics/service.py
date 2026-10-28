@@ -48,10 +48,11 @@ def get_sales_summary(start_month : str | None = None , end_month :str | None = 
     sql = f"""
         SELECT
             COUNT(DISTINCT productor)                                 AS brand_count,
-            COUNT(DISTINCT name)                                      AS product_count,
+            COUNT(DISTINCT (productor, name))                         AS product_count,
             COALESCE(SUM(total_sales), 0)                             AS total_sales,
             COALESCE(SUM(total_amount),0)                             AS total_amount,
-            COALESCE(SUM(price_sum) / NULLIF(SUM(record_count),0), 0) AS avg_price
+            COALESCE(SUM(price_sum) / NULLIF(SUM(record_count),0), 0)    AS avg_listed_price,
+            COALESCE(SUM(total_amount) / NULLIF(SUM(total_sales),0), 0)  AS avg_selling_price
         FROM dws_sales
         {where_sql}
     """
@@ -64,7 +65,9 @@ def get_sales_summary(start_month : str | None = None , end_month :str | None = 
         "product_count":int(row["product_count"]),
         "total_sales":int(row["total_sales"]),
         "total_amount":round(float(row["total_amount"]),2),
-        "avg_price":round(float(row["avg_price"]),2),
+        "avg_listed_price": round(float(row["avg_listed_price"]), 2),
+        "avg_selling_price": round(float(row["avg_selling_price"]), 2),
+        "avg_price": round(float(row["avg_listed_price"]), 2),   # 兼容旧调用方
     }
 
 
@@ -92,7 +95,7 @@ def get_top_products(limit: int = 5, category: str | None = None, start_month: s
                name,
                SUM(total_sales)                             AS total_sales,
                SUM(total_amount)                            AS total_amount,
-               SUM(price_sum) / NULLIF(SUM(record_count),0) AS avg_price
+               COALESCE(SUM(price_sum) / NULLIF(SUM(record_count),0), 0) AS avg_price
         FROM dws_sales
         {where_sql}
         GROUP BY productor, name

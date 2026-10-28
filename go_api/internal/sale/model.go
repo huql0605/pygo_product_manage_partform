@@ -3,6 +3,8 @@ package sale
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type Sales struct {
@@ -11,7 +13,7 @@ type Sales struct {
 	BatchID   *uint           `json:"batch_id" gorm:"index"` //手工导入时为空
 	Productor string          `json:"productor" gorm:"not null;index"`
 	Name      string          `json:"name" gorm:"not null;index"`
-	Price     float64         `json:"price" gorm:"not null"`
+	Price     decimal.Decimal `json:"price" gorm:"type:numeric(18,4);not null"`
 	Sales     int64           `json:"sales" gorm:"not null"`
 	Month     string          `json:"month" gorm:"type:varchar(7);not null;index"`
 	Attrs     json.RawMessage `json:"attrs" gorm:"type:jsonb;not null;default:'{}'"`

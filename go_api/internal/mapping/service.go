@@ -80,14 +80,12 @@ type TransformResult struct {
 
 // Transform 把某批次的原始数据翻译成标准层（sales）数据。
 // 幂等：同批次重复转换只覆盖，不翻倍（靠 sale.Service.ReplaceBatch）。
-// 状态流转：成功 → mapped；转换失败 → failed（尽力标记，但不覆盖真正的错误）。
+// 状态流转：成功 → mapped；转换失败不改状态——本轮未写入任何数据，库内仍是上一版。
 func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 	res, err := s.transform(batchID)
 	if err != nil {
-		// 批次不存在就不必标记了；其它失败尽力标 failed
-		if !errors.Is(err, raw.ErrBatchNotFound) {
-			_ = s.raws.UpdateStatus(batchID, raw.StatusFailed)
-		}
+		// 转换失败时未写入任何数据，库内仍是上一版，status 保持原值即正确。
+		// 失败原因由返回的 error 承载（HTTP 层已映射为 400）。
 		return nil, err
 	}
 	if err := s.raws.UpdateStatus(batchID, raw.StatusMapped); err != nil {
@@ -142,9 +140,12 @@ func (s *Service) transform(batchID uint) (*TransformResult, error) {
 			ignoredSet[col] = struct{}{}
 		}
 
-		attrs := make(map[string]string, len(ignored))
-		for _, col := range ignored {
-			attrs[col] = valueToString(obj[col])
+		attrs := make(map[string]string, len(obj))
+		for col, v := range obj {
+			if IsStandardField(col) {
+				continue
+			}
+			attrs[col] = valueToString(v)
 		}
 		row, err := buildRow(values, lineNo)
 		if err != nil {

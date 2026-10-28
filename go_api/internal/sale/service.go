@@ -30,6 +30,9 @@ type CreateBatchResult struct {
 func (s *Service) buildItems(productID uint, batchID *uint, rows []SaleRow) ([]Sales, error) {
 	items := make([]Sales, 0, len(rows))
 	for i, row := range rows {
+		if row.Price.IsNegative() {
+			return nil, fmt.Errorf("第 %d 行单价不能为负: %v", i+1, row.Price)
+		}
 		if !monthRe.MatchString(row.Month) {
 			return nil, fmt.Errorf("第 %d 行月份格式错误： %q (需要 YYYY-MM)", i+1, row.Month)
 		}
