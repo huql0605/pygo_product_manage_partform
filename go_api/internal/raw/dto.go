@@ -37,3 +37,15 @@ type DeleteImportResult struct {
 	SummaryRefreshed bool   `json:"summary_refreshed"`
 	SummaryError     string `json:"summary_error,omitempty"`
 }
+
+// UploadImportInput 是 service 层的上传入参，不直接绑定 HTTP。
+type UploadImportInput struct {
+	Source        string
+	Category      string
+	Filename      string
+	ContentType   string
+	ReaderVersion string
+	Content       []byte
+	Rows          []map[string]any
+	ExpectedHash  string
+}

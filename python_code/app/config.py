@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     # 属性聚合允许查询的 key，逗号分隔；设为 * 表示放行任意合法命名的 key
     allowed_attrs:str =Field(default="storage,screen,cpu,ram,color,weight",validation_alias="ALLOWED_ATTRS")
 
+    max_upload_bytes :int =Field(
+        default=32*1024*1024,
+        validation_alias="MAX_UPLOAD_BYTES",
+    )
+
 
 
 # 全局唯一实例：字段必须通过实例访问，不能直接用 Settings.database_url

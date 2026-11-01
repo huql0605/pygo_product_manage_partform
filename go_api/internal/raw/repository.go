@@ -1,6 +1,11 @@
 package raw
 
-import "gorm.io/gorm"
+import (
+	"errors"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
 
 type Repository struct {
 	db *gorm.DB
@@ -105,4 +110,61 @@ func (r *Repository) PurgeBatch(id uint) (int64, error) {
 		return tx.Delete(&ImportBatch{}, id).Error
 	})
 	return deletedSales, err
+}
+
+func (r *Repository) CreateBatchWithFile(batch *ImportBatch, file *RawFile, records []RawRecord) (bool, error) {
+	dupilcated := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var stored RawFile
+		res := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "sha256"}},
+			DoNothing: true,
+		}).Create(file)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			if err := tx.Where("sha256 = ?", file.SHA256).First(&stored).Error; err != nil {
+				return err
+			}
+
+		} else {
+			stored = *file
+		}
+		batch.RawFileID = &stored.ID
+		batch.FileHash = stored.SHA256
+
+		var existing ImportBatch
+		err := tx.Where("category = ? AND raw_file_id = ?", batch.Category, batch.RawFileID).First(&existing).Error
+		if err == nil {
+			*batch = existing
+			dupilcated = true
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		res = tx.Clauses(clause.OnConflict{DoNothing: true}).Create(batch)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			if err := tx.Where("category = ? AND raw_file_id = ?", batch.Category, batch.RawFileID).First(&existing).Error; err != nil {
+				return err
+			}
+			*batch = existing
+			dupilcated = true
+			return nil
+		}
+
+		for i := range records {
+			records[i].BatchID = batch.ID
+		}
+		if len(records) == 0 {
+			return nil
+		}
+		return tx.CreateInBatches(records, 500).Error
+	})
+	return dupilcated, err
 }

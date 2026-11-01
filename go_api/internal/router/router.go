@@ -60,6 +60,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r.POST("/api/imports/:id/transform", mh.Transform)
 	r.GET("/api/imports/:id/columns", rh.ListColumns)
 	r.GET("/api/imports/:id", rh.ShowImportsCount)
+	r.POST("/api/import-uploads", rh.UploadImport)
 	r.POST("/api/mappings", mh.Upsert)
 	r.GET("/api/mappings", mh.List)
 	r.POST("/api/summary/refresh", smh.Refresh)
@@ -75,7 +76,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 func MustMigrate(db *gorm.DB) {
 	if err := db.AutoMigrate(
 		&product.Product{}, &sale.Sales{},
-		&raw.ImportBatch{}, &raw.RawRecord{},
+		&raw.ImportBatch{}, &raw.RawRecord{}, &raw.RawFile{},
 		&mapping.FieldMapping{},
 		&summary.SalesSummary{},
 	); err != nil {

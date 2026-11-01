@@ -1,9 +1,12 @@
 package raw
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/huql0605/go_api/internal/summary"
 	"gorm.io/gorm"
@@ -31,11 +34,13 @@ func (s *Service) WithSummary(r SummaryRefresher) *Service {
 }
 
 type CreateResult struct {
-	BatchID  uint `json:"batch_id"`
-	RowCount int  `json:"row_count"`
+	BatchID    uint   `json:"batch_id"`
+	RowCount   int    `json:"row_count"`
+	Duplicated bool   `json:"duplicated"`
+	FileHash   string `json:"file_hash,omitempty"`
 }
 
-func (s *Service) CreateBatch(source, category string, rows []map[string]any) (*CreateResult, error) {
+func (s *Service) buildRecords(rows []map[string]any) ([]RawRecord, error) {
 	records := make([]RawRecord, 0, len(rows))
 	for i, row := range rows {
 		b, err := json.Marshal(row)
@@ -47,7 +52,14 @@ func (s *Service) CreateBatch(source, category string, rows []map[string]any) (*
 			RowData:  b,
 		})
 	}
+	return records, nil
+}
 
+func (s *Service) CreateBatch(source, category string, rows []map[string]any) (*CreateResult, error) {
+	records, err := s.buildRecords(rows)
+	if err != nil {
+		return nil, err
+	}
 	batch := &ImportBatch{
 		Source:   source,
 		Category: category,
@@ -130,4 +142,56 @@ func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
 		}
 	}
 	return res, nil
+}
+
+func (s *Service) CreateBatchFromFile(in UploadImportInput) (*CreateResult, error) {
+	if len(in.Content) == 0 {
+		return nil, fmt.Errorf("原始文件为空")
+	}
+	if in.Category == "" {
+		return nil, fmt.Errorf("category 不能为空")
+	}
+	sum := sha256.Sum256(in.Content)
+	hash := hex.EncodeToString(sum[:])
+	if in.ExpectedHash != "" && !strings.EqualFold(in.ExpectedHash, hash) {
+		return nil, fmt.Errorf("文件指纹不一致：客户端 %s，服务端 %s", in.ExpectedHash, hash)
+	}
+
+	records, err := s.buildRecords(in.Rows)
+	if err != nil {
+		return nil, err
+	}
+	source := strings.TrimSpace(in.Source)
+	if source == "" {
+		source = in.Filename
+	}
+
+	batch := &ImportBatch{
+		Source:        source,
+		Category:      in.Category,
+		Status:        StatusLoaded,
+		RowCount:      len(records),
+		FileHash:      hash,
+		ReaderVersion: in.ReaderVersion,
+	}
+	file := &RawFile{
+		SHA256:      hash,
+		Size:        int64(len(in.Content)),
+		Filename:    in.Filename,
+		ContentType: in.ContentType,
+		StorageKind: "db",
+		Content:     in.Content,
+	}
+
+	duplicated, err := s.repo.CreateBatchWithFile(batch, file, records)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CreateResult{
+		BatchID:    batch.ID,
+		RowCount:   batch.RowCount,
+		Duplicated: duplicated,
+		FileHash:   hash,
+	}, nil
 }

@@ -1,529 +1,688 @@
-# 设计评审：分层数据平台
+# 设计评审：分层数据平台（2026-10-31 复核更新）
 
-> 本文是一次针对现有设计与实现的缺陷评审，目的是给出**明确的待修改清单**。
+> 基线：`4df6303`（2026-10-28，提交信息为“大改动，修改原始层没有存到原始数据的问题”）。
+> 上一版评审写于 2026-10-21。此后代码已修掉一部分 P0，但原始层、手工数据生命周期、汇总层刷新/对账等结构性问题仍在。
+> 本文保留原编号以便追溯，并新增 23–30 号问题；每条结论都对应仓库中的实际代码位置。
 
-## 0. 评审说明
+## 0. 本轮复核说明
 
-- 原始需求对话（DeepSeek 分享链接）需要登录，无法读取。本文结论全部基于仓库现有代码与 `docs/architecture.md` 的实际内容，每条都附带可核对的位置。
-- 评审范围：`go_api/`、`python_code/`、`docs/architecture.md`、`README.md`。
-- 结论：宏观分层思路（ODS → DWD → DWS、幂等转换、分子分母存法）成立，缺陷集中在**边界准确性**——文档声称的能力，代码有几处并未真正实现。
+**复核范围**：`README.md`、`docs/architecture.md`、`docs/design-review.md`、`go_api/`、`python_code/`（不含 `.venv`）。
+
+**复核方法**：
+
+1. 逐项对照上一版评审与当前代码，确认「声称已改」是否真的落地。
+2. 重新阅读 README 与架构文档，找出文档与实现的偏差。
+3. 运行现有测试，确认基线可用。
+
+**本轮执行结果**：
+
+| 检查 | 结果 |
+|---|---|
+| `cd go_api && go build ./...` | 通过 |
+| `cd go_api && go test ./...` | 通过；`mapping` 单测通过，`summary` 的 3 个集成测试因未设置 `TEST_DATABASE_URL` 跳过 |
+| `cd go_api && go vet ./...` | 通过 |
+| `cd python_code && uv run python -m unittest discover -s tests -v` | 8 个用例全部通过 |
+| 真实 PostgreSQL + 双服务联调 | **未执行**；未设置 `TEST_DATABASE_URL`，数据库相关结论来自代码审阅 |
+
+**总体结论**：
+
+- 上一轮最紧迫的金额精度（#2）、`avg_price` 口径（#3）、`product_count`（#4）、失败状态与数据矛盾（#5）、`attrs` 内容漂移（#6）已经修复，属于实质性改进。
+- 但 #1（原始层不可重放）、#7（手工数据无法删除）两个 P0 仍在；#8/#9/#11/#12 等规模问题没有动。
+- 本轮新增 3 个 P1 级问题，其中 **transform 对 `sales` 的解析会静默截断/接受负数和 NaN** 最值得优先修，它直接污染明细与汇总。
+- 文档仍停留在修复前的语义（`failed` 状态、只返回 `avg_price`、grain 能支撑全部报表），需要与代码同步。
+
+等级定义不变：
+
+- **P0**：数据错误、数据丢失或不可回溯，必须改。
+- **P1**：数据量、并发或脏输入上来后会产生错误结果，需要改。
+- **P2**：口径不一致、维护成本高、错误语义混乱，建议改。
+
+状态标记：**✅ 已修复** · **◐ 部分修复** · **❌ 仍存在** · **🆕 本轮新增**
 
 ---
 
 ## 1. 缺陷总览
 
-等级定义：
-
-- **P0**：会导致数据错误、数据丢失或不可回溯，必须改。
-- **P1**：数据量或并发上来后会失效，需要改。
-- **P2**：口径不一致、维护成本高、错误语义混乱，建议改。
-
-| 编号 | 等级 | 问题 | 位置 |
-|---|---|---|---|
-| 1 | P0 | 「原始层不解析」实际不成立，解析发生在 Python，且未保存原始文件 | `python_code/app/modules/importer/csv_reader.py` |
-| 2 | P0 | 金额用 `float64` / `float8` 存储，累计产生精度误差 | `go_api/internal/sale/model.go`、`go_api/internal/summary/model.go` |
-| 3 | P0 | `avg_price` 按记录数加权，口径可疑且缺「平均成交价」 | `python_code/app/modules/analytics/service.py` |
-| 4 | P0 | `product_count` 用 `COUNT(DISTINCT name)`，跨品牌同名机型被合并 | `python_code/app/modules/analytics/service.py` |
-| 5 | P0 | 转换失败后状态为 `failed`，但上一轮 `sales` 数据仍在，状态与数据矛盾 | `go_api/internal/mapping/service.go` |
-| 6 | P0 | `attrs` 只装未映射列，改映射后重跑会导致属性数据消失 | `go_api/internal/mapping/service.go` |
-| 7 | P0 | 手工写入（`batch_id` 为空）的销售数据无任何删除路径 | `go_api/internal/raw/repository.go`、`go_api/internal/sale/service.go` |
-| 8 | P1 | 汇总层全量 `TRUNCATE` 重建同步跑在请求里，O(N²) 且阻塞分析读 | `go_api/internal/summary/repository.go` |
-| 9 | P1 | 对账只比 `total_sales`，单价变化检测不到；无分页与上限 | `go_api/internal/summary/repository.go` |
-| 10 | P1 | 文档称 grain 能支撑全部报表，但 `attributes` 报表需要 `attrs`，实际支撑不了 | `docs/architecture.md` 6.1 |
-| 11 | P1 | 明细口径与汇总口径并存，无一致性校验、响应体不区分来源 | `python_code/app/modules/analytics/service.py` |
-| 12 | P1 | `transform` 一次性全量载入内存，无流式分批 | `go_api/internal/mapping/service.go` |
-| 13 | P2 | 上游 4xx 被统一压成 502，客户端错误报成服务端故障 | `go_api/internal/analytics/client.go` |
-| 14 | P2 | `limit` 在三个分析接口上处理规则不一致，前两个必然触发第 13 条 | `go_api/internal/analytics/handler.go` |
-| 15 | P2 | `attributes` 的 `productor` 参数被静默丢弃，与 README 不一致 | `python_code/app/api/analytics.py` |
-| 16 | P2 | `start_month` / `end_month` 全链路无格式校验，写错静默返回错误结果 | `go_api/internal/analytics/handler.go`、`python_code/app/modules/analytics/service.py` |
-| 17 | P2 | 数据库层无外键、无 `CHECK`、状态无枚举 | `go_api/internal/sale/model.go`、`go_api/internal/raw/model.go` |
-| 18 | P2 | `PurgeBatch` 直接删 `sales` 表，破坏自身声明的分层约定 | `go_api/internal/raw/repository.go` |
-| 19 | P2 | 没有真正的 ADS 层，报表每次现算，口径无版本 | `docs/architecture.md` 第 1 节 |
-| 20 | P2 | Python + Pandas 承担的只是纯 SQL 代理，收益低、成本高 | 整体架构 |
-| 21 | P2 | 测试只覆盖纯函数，幂等/事务/并发/HTTP 层无覆盖 | `go_api/internal/*/`、`python_code/tests/` |
-| 22 | P2 | 注释与实现不符（`List`、`ListColumns` 样例值语义） | `go_api/internal/product/repository.go`、`go_api/internal/raw/repository.go` |
-
----
-
-## 2. P0：正确性与可回溯
-
-### 2.1 原始层其实已经被解析过
-
-`docs/architecture.md` 的核心论断是：
-
-> 用户输入永远先进原始层，永远不直接进标准层。
-
-但真正的解析发生在 Python：
-
-```python
-pd.read_csv(source, dtype=str, encoding="utf-8-sig", keep_default_na=False)
-```
-
-这一步已经完成了编码归一（去 BOM）、类型强转、空值改写、分隔符推断。Go 侧所谓「原样存 JSONB」，存的是**Python 二次序列化后的结果**，既不是原始字节，也没有保留文件本身。
-
-**影响**
-
-- 原始文件丢弃后无法真正重放，解析规则变更、编码判断错误都无法修复历史批次。
-- Excel 上传路径中，`openpyxl` 已把数值转成 float，精度损失发生在进入 ODS 之前。
-- 没有文件指纹，导致同一文件重复上传无法识别（见第 7 条与第 1 条关联）。
-
-**建议改法**
-
-- 新增原始文件留存：`raw_files(sha256, filename, bytes | object_key, created_at)`。
-- 批次表记录 `file_hash`，同一 `(category, file_hash)` 重复上传时返回已有批次而非新建。
-- 解析产物降级为「可重算的派生结果」，并记录 reader 版本号。
-- 文档改写：原始层的定义是「原始文件字节」，不是「Python 解析后的字典」。
-
-**涉及文件**：`python_code/app/api/importer.py`、`python_code/app/modules/importer/csv_reader.py`、`go_api/internal/raw/`、`docs/architecture.md`
+| 编号 | 等级 | 问题 | 状态 | 位置 |
+|---|---|---|---|---|
+| 1 | P0 | 「原始层不解析」不成立，解析在 Python，且未保存原始文件 | ❌ | `python_code/app/modules/importer/csv_reader.py` |
+| 2 | P0 | 金额用 `float64` / `float8` 存储 | ✅ | `go_api/internal/sale/model.go`、`summary/model.go` |
+| 3 | P0 | `avg_price` 按记录数加权，缺「平均成交价」 | ✅ | `python_code/app/modules/analytics/service.py` |
+| 4 | P0 | `product_count` 用 `COUNT(DISTINCT name)` | ✅ | `python_code/app/modules/analytics/service.py` |
+| 5 | P0 | 转换失败后 `failed` 状态与上一轮 `sales` 数据矛盾 | ◐ | `go_api/internal/mapping/service.go` |
+| 6 | P0 | `attrs` 只装未映射列，改映射后属性数据消失 | ✅ | `go_api/internal/mapping/service.go` |
+| 7 | P0 | 手工写入（`batch_id` 为空）无删除路径 | ❌ | `go_api/internal/sale/service.go`、`raw/repository.go` |
+| 8 | P1 | 汇总层全量 `TRUNCATE` 重建同步跑在请求里 | ❌ | `go_api/internal/summary/repository.go` |
+| 9 | P1 | 对账只比 `total_sales`，无分页与上限 | ❌ | `go_api/internal/summary/repository.go` |
+| 10 | P1 | 文档称 grain 能支撑全部报表，但 `attributes` 依赖 `attrs` | ❌ | `docs/architecture.md` 6.1 |
+| 11 | P1 | 明细口径与汇总口径并存，响应不区分来源 | ❌ | `go_api/internal/analytics/handler.go`、Python service |
+| 12 | P1 | `transform` 一次性全量载入内存，无流式分批 | ❌ | `go_api/internal/mapping/service.go` |
+| 13 | P2 | 上游 4xx 被统一压成 502 | ❌ | `go_api/internal/analytics/client.go` |
+| 14 | P2 | `limit` 在分析接口上处理规则不一致 | ❌ | `go_api/internal/analytics/handler.go` |
+| 15 | P2 | `attributes` 的 `productor` 参数被静默丢弃 | ◐ | `python_code/app/api/analytics.py` |
+| 16 | P2 | `start_month` / `end_month` 全链路无格式校验 | ❌ | `go_api/internal/analytics/handler.go`、Python service |
+| 17 | P2 | 数据库层无外键、无 `CHECK`、状态无枚举 | ❌ | `go_api/internal/sale/model.go`、`raw/model.go` |
+| 18 | P2 | `PurgeBatch` 直接删 `sales`；新增的 `uow` 未被使用 | ❌ | `go_api/internal/raw/repository.go`、`common/uow/uow.go` |
+| 19 | P2 | 没有真正的 ADS 层，报表每次现算 | ❌ | `docs/architecture.md` 第 1 节 |
+| 20 | P2 | Python + Pandas 承担的主要是纯 SQL 代理 | ❌ | 整体架构 |
+| 21 | P2 | 测试偏纯函数，handler / 事务 / 并发无覆盖 | ◐ | `go_api/internal/*/`、`python_code/tests/` |
+| 22 | P2 | 注释与实现不符（样例值、行数口径、路由注释） | ◐ | `raw/repository.go`、`router.go`、`raw/handler.go` |
+| 23 | P1 | `transform` 用 `ParseFloat` + `int64` 解析销量，静默截断/接受负数/NaN | 🆕 | `go_api/internal/mapping/transform.go` |
+| 24 | P1 | `POST /api/sales/batch` 的 `batch_id` 未校验归属，可挂到任意批次并被级联删除 | 🆕 | `go_api/internal/sale/service.go` |
+| 25 | P1 | 同一批次并发 `transform` 可产生重复明细 | 🆕 | `go_api/internal/mapping/service.go`、`sale/repository.go` |
+| 26 | P2 | `attrs` 的 key 是原始列名，中文 key 无法查询，默认白名单也漏了实际列 | 🆕 | `go_api/internal/mapping/service.go`、`python_code/app/modules/analytics/service.py` |
+| 27 | P2 | `/import/upload` 阻塞事件循环、无大小/行数预检、客户端错误返回 502 | 🆕 | `python_code/app/api/importer.py` |
+| 28 | P2 | 错误码映射不一致：转换失败一律 400，手工写入失败一律 500 | 🆕 | `go_api/internal/mapping/handler.go`、`sale/handler.go` |
+| 29 | P2 | README / architecture 与当前实现多处漂移 | 🆕 | `README.md`、`docs/architecture.md` |
+| 30 | P2 | `POST /api/imports` 不校验品类是否存在，产生永远无法转换的孤儿批次 | 🆕 | `go_api/internal/raw/service.go` |
 
 ---
 
-### 2.2 金额使用浮点数
+## 2. 本轮确认已修复
 
-`sale.Sales.Price`、`dws_sales.total_amount / price_sum / min_price / max_price` 全部是 Go `float64`，落库为 PostgreSQL `float8`。
+### 2.1 金额精度（原 #2）✅
 
-**影响**
+`sales.price`、`dws_sales.total_amount / price_sum / min_price / max_price` 已改为 `decimal.Decimal` + PostgreSQL `numeric(18,4)`：
 
-- `SUM(price * sales)` 在亿级金额上出现可见误差。
-- 目前仅靠 Python 侧 `round(..., 2)` 掩盖，误差在库内依然存在，对账与导出会受到污染。
+- `go_api/internal/sale/model.go:16`
+- `go_api/internal/summary/model.go:17-22`
+- `go_api/internal/mapping/transform.go:82` 使用 `decimal.NewFromString`
+- 聚合 SQL 直接 `SUM(sales * price)`，由数据库按 numeric 计算
 
-**建议改法**
+只在 Python 出参时 `round(float(...), 2)`，属于展示层转换，库内不再累计浮点误差。
 
-- 存储类型改为 `numeric(18,4)`。
-- Go 侧使用 decimal 类型（如 `shopspring/decimal`），只在出参序列化时转 float。
-- 同步修改 `summary` 聚合 SQL 与 `analytics` 的取数转换。
+> 残留（低优先级）：`products.price` 仍是 `float64`（`product/model.go:9`），但它只是品类参考价，不参与销售金额累计，暂不影响报表。
 
-**涉及文件**：`go_api/internal/sale/model.go`、`go_api/internal/sale/dto.go`、`go_api/internal/summary/model.go`、`go_api/internal/summary/repository.go`、`python_code/app/modules/analytics/service.py`
+### 2.2 `avg_price` 拆分（原 #3）✅
 
----
-
-### 2.3 `avg_price` 口径需要拆分
-
-当前定义：
+`get_sales_summary` 已同时返回两个口径：
 
 ```sql
-COALESCE(SUM(price_sum) / NULLIF(SUM(record_count), 0), 0) AS avg_price
+SUM(price_sum) / SUM(record_count)  AS avg_listed_price
+SUM(total_amount) / SUM(total_sales) AS avg_selling_price
 ```
 
-即**按记录数加权**的平均单价。一条销量 1 的记录与一条销量 100000 的记录权重相同，业务上几乎没有解释力。
+见 `python_code/app/modules/analytics/service.py:54-55,68-70`。旧的 `avg_price` 作为 `avg_listed_price` 的兼容别名保留。
 
-**建议改法**
+> 残留：`top-products` 仍只返回 `avg_price`，语义仍是“按记录数加权的挂牌价”（`service.py:98`）。如果前端把它当成交价用，会继续误导；见 5.10。
 
-| 指标 | 公式 | 含义 |
-|---|---|---|
-| `avg_listed_price` | `SUM(price_sum) / SUM(record_count)` | 按记录数加权（保留现有语义，改名） |
-| `avg_selling_price` | `SUM(total_amount) / SUM(total_sales)` | 按销量加权，业务常用 |
+### 2.3 `product_count`（原 #4）✅
 
-**涉及文件**：`python_code/app/modules/analytics/service.py`、`README.md`
-
----
-
-### 2.4 `product_count` 计算错误
-
-```sql
-COUNT(DISTINCT name) AS product_count
-```
-
-`name` 未带品牌维度。不同品牌存在同名机型时（`Pro`、`X1`、`A1` 这类很常见）会被合并成一个「产品」。
-
-**建议改法**
+`get_sales_summary` 已改为：
 
 ```sql
 COUNT(DISTINCT (productor, name)) AS product_count
 ```
 
-**涉及文件**：`python_code/app/modules/analytics/service.py`
+见 `python_code/app/modules/analytics/service.py:51`。品牌排行里的 `COUNT(DISTINCT name)` 在 `GROUP BY productor` 下是正确的，不需要改。
+
+### 2.4 失败状态与数据矛盾（原 #5）◐
+
+`mapping.Service.Transform` 不再在失败时写 `status=failed`：
+
+- `Transform` 只在核心转换成功后调用 `UpdateStatus(..., mapped)`（`mapping/service.go:84-101`）。
+- 失败发生在写库之前，上一轮 `sales` 保持不变，语义自洽。
+- 单测 `TestTransform_MissingField_DoesNotTouchStatus`、`TestTransform_AmbiguousColumns_ReportsRealError` 已钉住“失败不改状态”。
+
+**残留问题**：
+
+1. `UpdateStatus` 在 `ReplaceBatch` 提交之后、独立事务中执行（`mapping/service.go:91`）。若状态更新失败，接口返回错误，但明细已经替换成功，客户端会误判。
+2. `raw.StatusFailed`（`raw/model.go:11`）已成为死常量；架构文档的状态图仍写 `loaded --> failed`。
+
+更彻底的做法仍是将“替换明细 + 更新状态”放进同一事务，或引入 `transforming` 中间态。
+
+### 2.5 `attrs` 不再是映射配置的副产物（原 #6）✅
+
+`mapping/service.go:143-154` 现在把**所有非标准列**写入 `attrs`，与是否配置映射无关：
+
+```go
+for col, v := range obj {
+    if IsStandardField(col) {
+        continue
+    }
+    attrs[col] = valueToString(v)
+}
+```
+
+映射规则只决定标准字段取值，不再影响 `attrs` 的键集合。重复 `transform` 不会因为补映射而丢属性。
+
+> 新的边界问题见 5.11（key 命名与白名单）。
+
+### 2.6 注释修正（原 #22）◐
+
+- `product/repository.go` 原先错误的“获取 sales 表所有商品”注释已删除。
+- 仍未修正的见 5.10：`router.go:54` 的路由注释、`ListColumns` 的样例值语义、`GET /api/imports/:id` 的行数口径。
 
 ---
 
-### 2.5 失败状态与数据状态互相矛盾
+## 3. P0：仍存在的正确性与可回溯问题
 
-`mapping.Service.Transform` 在失败时标记 `status=failed`，但上一轮成功转换写入的 `sales` 行**没有被清理**，`dws_sales` 中仍然包含这批数据。
+### 3.1 原始层仍然不是原始层（原 #1）❌
 
-**影响**
+`docs/architecture.md` 仍声称“原样存 JSONB，不解析”，但真正的解析发生在 Python：
 
-- `GET /api/imports` 显示 failed，`/api/analytics` 却把它计入统计。
-- 排查问题时结论会被误导，这是最典型的坑。
+```python
+pd.read_csv(source, dtype=str, encoding="utf-8-sig", keep_default_na=False)
+```
 
-**建议改法**
+见 `python_code/app/modules/importer/csv_reader.py:8-16` 与 `excel_reader.py:3-6`。
 
-- 把 `ReplaceBatch` 与 `UpdateStatus` 放进同一事务，状态与数据同生共死。
-- 或者引入 `transforming` 中间态，失败后回到上一个已生效版本，并在响应中明确「当前生效的是哪个版本」。
+这意味着：
 
-**涉及文件**：`go_api/internal/mapping/service.go`、`go_api/internal/sale/repository.go`、`go_api/internal/raw/repository.go`
+- `utf-8-sig` 已去 BOM，`dtype=str` 已做类型归一，`keep_default_na=False` 已改写空值策略；Go 侧存的只是 Python 二次序列化后的字典。
+- 原始文件没有落盘，没有 SHA-256，没有 reader 版本号。解析规则变更、编码判断错误、Excel 数值精度问题都无法对历史批次重放。
+- 同一文件重复上传无法识别，只能靠人工判断。
 
----
+本次提交信息虽然提到“修改原始层没有存到原始数据的问题”，实际改的是 `attrs`（#6），**没有**新增原始文件留存或文件指纹。
 
-### 2.6 `attrs` 是映射配置的副产物
+**建议改法**：
 
-`mapping/service.go` 中 `attrs` 只从 `ignored`（未匹配到标准字段的列）填充。
+1. 新增 `raw_files(sha256 PK, filename, content bytea | object_key, size, created_at)`。
+2. `import_batches` 增加 `file_hash`、`reader_version`；`(category, file_hash)` 重复上传返回已有批次。
+3. 原始文件与解析产物分离：解析产物是可重算的派生结果，原始字节才是 ODS。
+4. 修正架构文档对“原始层”的定义。
 
-**影响**
-
-- 今天未配映射，`屏幕` 列进入 `attrs`。
-- 明天补一条映射再重跑 `transform`，`attrs["屏幕"]` 消失。
-- 属性分析报表的结果随映射配置变化而漂移，且不可复现。
-
-**建议改法**
-
-- `attrs` 装入**所有非标准列**，与是否配置过映射无关。
-- 映射规则只决定标准字段的取值来源，不决定 `attrs` 的内容。
-
-**涉及文件**：`go_api/internal/mapping/service.go`、`go_api/internal/mapping/transform.go`
+**涉及文件**：`python_code/app/api/importer.py`、`python_code/app/modules/importer/`、`go_api/internal/raw/`、`docs/architecture.md`
 
 ---
 
-### 2.7 手工写入的数据永久无法删除
+### 3.2 手工写入的数据仍无删除路径（原 #7）❌
 
-`sales.batch_id` 为 NULL 表示手工导入，而删除路径是 `DELETE FROM sales WHERE batch_id = ?`，不会命中 NULL。
+`POST /api/sales/batch` 仍允许 `batch_id` 为空直接写 `sales`（`sale/dto.go:14-18`、`sale/service.go:60-73`）。而删除路径只有：
 
-结合 `POST /api/sales/batch`「追加写入、非幂等」的语义，等于**写错一次数据永久污染报表**。
+```sql
+DELETE FROM sales WHERE batch_id = ?
+```
 
-**建议改法**
+见 `raw/repository.go:93-108`。`batch_id IS NULL` 的行永远不会被命中。
 
-- 为手工写入也生成批次（`source=manual`），使所有明细都挂在批次下。
-- 增加明细行的物理删除接口，或至少提供按 `(productor, name, month)` 的回滚能力。
+结合“追加写入、非幂等”的语义，写错一次就会永久污染报表和汇总层，只能手工进数据库清理。
 
-**涉及文件**：`go_api/internal/sale/service.go`、`go_api/internal/raw/repository.go`、`go_api/internal/sale/handler.go`
+**建议改法**：
+
+- 为手工写入也自动创建一个 `source=manual` 的批次，让所有明细都挂在批次下；或
+- 提供按批次/按 `(productor, name, month)` 的明细回滚接口；至少不要允许匿名 NULL 批次长期存在。
+
+**涉及文件**：`go_api/internal/sale/service.go`、`go_api/internal/sale/handler.go`、`go_api/internal/raw/repository.go`
 
 ---
 
-## 3. P1：规模与性能
+## 4. P1：仍存在的规模与正确性问题
 
-### 3.1 汇总层全量重建跑在请求里
+### 4.1 汇总层全量重建跑在请求里（原 #8）❌
 
-`summary.Repository.RefreshAll` 是 `TRUNCATE + INSERT ... GROUP BY` 的单事务，被 `transform` 与 `delete` 两个请求**同步触发**。
+`summary.Repository.RefreshAll` 仍是单事务 `TRUNCATE + INSERT ... GROUP BY`：
 
-**三重问题**
+- `summary/repository.go:13-48`
+- `transform` 成功后同步调用（`mapping/service.go:94-99`）
+- 删除批次后同步调用（`raw/service.go:125-131`）
+
+三重问题未变：
 
 | 问题 | 说明 |
 |---|---|
 | O(N²) | 导入 N 个批次 = 重建 N 次全表，总代价随累计数据量平方增长 |
-| 读阻塞 | `TRUNCATE` 持 `ACCESS EXCLUSIVE` 锁直到事务提交，期间所有分析查询被挡住 |
-| 请求超时 | `transform` 耗时才随累计数据量线性增长，前端先超时而后端仍在跑 |
+| 读阻塞 | `TRUNCATE` 持 `ACCESS EXCLUSIVE` 锁到事务提交，期间分析查询被挡住 |
+| 请求超时 | `transform`/`delete` 耗时随累计数据量线性增长，前端先超时而后端仍在跑 |
 
-**建议改法**
+另外 `sales` 上没有 `(product_id, productor, name, month)` 复合索引，刷新本身也是全表扫 + 排序。
 
-- 改为增量重算受影响的 grain（`docs/architecture.md` 6.3 已给出正确思路）。
-- 用 `INSERT ... ON CONFLICT (grain) DO UPDATE` 替代 `TRUNCATE`，避免排他锁。
-- 把刷新移出请求链路，改为异步任务；`transform` 只返回「明细已写入，汇总刷新中」。
-- 若短期无法改异步，至少把 `TRUNCATE` 换成 `DELETE` + 索引，降低锁级别。
+**建议改法**：
 
-**涉及文件**：`go_api/internal/summary/repository.go`、`go_api/internal/summary/service.go`、`go_api/internal/mapping/service.go`、`go_api/internal/raw/service.go`
+- 改为增量重算受影响的 grain，用 `INSERT ... ON CONFLICT (grain) DO UPDATE`，避免 `TRUNCATE` 的排他锁。
+- 把刷新移出请求链路，改为异步任务/队列；`transform` 只返回“明细已写入，汇总刷新中”。
+- 补 `sales(product_id, productor, name, month)` 复合索引。
+
+**涉及文件**：`go_api/internal/summary/repository.go`、`mapping/service.go`、`raw/service.go`
 
 ---
 
-### 3.2 对账接口不完整且不可用
+### 4.2 对账接口不完整（原 #9）❌
 
-`summary.Repository.Verify` 只比较 `total_sales`：
+`summary.Repository.Verify` 仍只比较 `total_sales`：
 
 ```sql
 WITH detail AS (SELECT ..., SUM(sales) AS total_sales FROM sales GROUP BY ...)
 ```
 
-**问题**
+见 `summary/repository.go:60-80`。
 
 | 问题 | 说明 |
 |---|---|
-| 漏校验 | `total_amount`、`price_sum`、`record_count` 全部未核对，单价变化检测不到 |
-| 无上限 | 全表双向 `EXCEPT`，无 `limit`、无分页，`differences` 可能是巨量 JSON |
+| 漏校验 | `total_amount`、`price_sum`、`record_count`、`min/max_price` 全部未核对 |
+| 无上限 | 双向 `EXCEPT` 全表执行，无 `limit`、无分页，差异可能是巨量 JSON |
 | 无性能约束 | 数据量大时接口超时 |
+| 无时间范围 | 无法只核对某个批次或月份 |
 
-**建议改法**
+**建议改法**：
 
-- 对账覆盖全部可加度量与分子分母。
-- 增加 `limit` 与 `offset`，只返回前 N 条差异 + 总数。
-- 大表场景改为抽样对账或按 `product_id` 分区对账。
+- 对账覆盖全部可加度量与分子分母，逐字段比较。
+- 增加 `limit`、`offset`，返回前 N 条差异 + 总数。
+- 支持按 `batch_id` 或 `month` 局部对账。
 
-**涉及文件**：`go_api/internal/summary/repository.go`、`go_api/internal/summary/service.go`、`go_api/internal/summary/handler.go`
+**涉及文件**：`go_api/internal/summary/repository.go`、`service.go`、`handler.go`
 
 ---
 
-### 3.3 grain 声明与报表需求不符
+### 4.3 grain 声明与报表需求不符（原 #10）❌
 
-`docs/architecture.md` 6.1 中：
+`docs/architecture.md:229` 仍写：
 
 > 这是能支撑全部现有报表的最小维度组合。
 
-但 `attributes` 报表依赖 `attrs`，而 `attrs` 不在 grain 中，因此它被迫改扫 `sales` 明细。该论断已不成立。
+但 `attributes` 报表依赖 `sales.attrs`，`attrs` 不在 grain 中，只能改扫明细。该论断不成立。
 
-**建议改法**
-
-- 修正文档表述：grain 支撑的是「结构化的四类报表」，属性类报表明确归为探索口径。
-- 或者在 DWS 中增加 `dws_sales_attrs(key, value, ...)` 的辅助汇总表。
+**建议改法**：把文档改成“grain 支撑结构化四类报表，属性类报表属于探索口径”；若要把属性报表也纳入确认口径，新增 `dws_sales_attrs(key, value, ...)` 辅助汇总表。
 
 **涉及文件**：`docs/architecture.md` 第 6 节
 
 ---
 
-### 3.4 双口径并存且无闸门
+### 4.4 双口径并存且无闸门（原 #11）❌
 
-`/api/analytics/attributes` 读 `sales`，其余四个接口读 `dws_sales`。
+`/api/analytics/attributes` 读 `sales`，其余四个接口读 `dws_sales`，但：
 
-**影响**
+- 响应体没有 `source: "dws" | "detail"`。
+- 没有 `as_of`（汇总层最后刷新时间）。
+- 路径没有显式区分“确认口径 / 探索口径”。
 
-- 汇总滞后时，「总销量」与「按属性分组的销量之和」对不上，系统不提示。
-- 口径分流仅靠文档约定，接口路径并列在同一前缀下，调用方容易混淆。
+汇总滞后时，“总销量”与“按属性分组销量之和”对不上，系统不会提示。
 
-**建议改法**
+**建议改法**：
 
-- 路径显式区分，例如 `/api/analytics/explore/attributes`。
-- 响应体增加 `source: "dws" | "detail"` 与 `as_of`（汇总层最后刷新时间）。
+- 路径显式区分，如 `/api/analytics/explore/attributes`。
+- 响应增加 `source` 与 `as_of`。
+- 在 `attributes` 响应中返回与 `sales` 同口径的 `total_sales`，便于调用方自查。
 
-**涉及文件**：`go_api/internal/router/router.go`、`go_api/internal/analytics/handler.go`、`python_code/app/modules/analytics/service.py`
-
----
-
-### 3.5 `transform` 全量载入内存
-
-`ListRecords` 一次读全部 `raw_records`，转成 `[]map` 再转 `[]SaleRow`，最后 `CreateInBatches`。峰值内存约为批次体积的 3 倍。
-
-`max=10000` 的行数上限只是掩盖了问题，不是解决。
-
-**建议改法**
-
-- 按 `row_index` 游标分页流式处理。
-- 边解析边分批写入，避免同时持有三份全量数据。
-
-**涉及文件**：`go_api/internal/mapping/service.go`、`go_api/internal/raw/repository.go`
+**涉及文件**：`go_api/internal/router/router.go`、`analytics/handler.go`、Python service
 
 ---
 
-## 4. P2：一致性与可维护性
+### 4.5 `transform` 全量载入内存（原 #12）❌
 
-### 4.1 上游 4xx 被压成 502
+`mapping/service.go:117-156` 仍然：
 
-`analytics.Client.get` 中，非 200/404 一律返回 `python returned %d`，Go 侧统一返回 `502 / 20001`。
+1. `ListRecords` 一次读全部 `raw_records`；
+2. 构造 `[]sale.SaleRow` 全量切片；
+3. 最后 `CreateInBatches` 一次性写入。
 
-**实际后果**
+峰值内存约为批次体积的 3 倍。`max=10000` 的行数上限只是掩盖问题。
+
+**建议改法**：按 `row_index` 游标分页流式处理，边解析边分批写入；错误信息仍保留行号。
+
+**涉及文件**：`go_api/internal/mapping/service.go`、`raw/repository.go`
+
+---
+
+### 4.6 销量解析会静默截断、接受负数与 NaN（新增 #23）🆕
+
+`mapping/transform.go:86-88`：
+
+```go
+salesNum, err := strconv.ParseFloat(values["sales"], 64)
+...
+Sales: int64(salesNum),
+```
+
+`ParseFloat` 的语义远宽于“销量”：
+
+| 输入 | 结果 |
+|---|---|
+| `"12.9"` | `12`，静默截断 |
+| `"-5"` | `-5`，负销量进入明细与汇总 |
+| `"NaN"` / `"Inf"` | `ParseFloat` 成功，转 `int64` 结果依赖实现（amd64 上通常得到极小值），污染汇总 |
+| `"9007199254740993"` | 超过 `2^53`，精度丢失 |
+
+HTTP 的 `POST /api/sales/batch` 有 `binding:"gte=0"`（`sale/dto.go:9`），但 `transform` 走的是自己的 `buildRow`，**没有** `sales >= 0` 校验，也没有整数校验。
+
+**建议改法**：
+
+- 用 `strconv.ParseInt(values["sales"], 10, 64)`，拒绝小数、科学计数法、NaN/Inf。
+- 显式校验 `sales >= 0`。
+- 补单测覆盖 `"12.9"`、`"-5"`、`"NaN"`、超大整数。
+
+**涉及文件**：`go_api/internal/mapping/transform.go`、`transform_test.go`
+
+---
+
+### 4.7 手工写入的 `batch_id` 未校验归属（新增 #24）🆕
+
+`POST /api/sales/batch` 允许客户端自带 `batch_id`（`sale/dto.go:16`）。`sale.Service.CreateBatch` 直接透传：
+
+```go
+func (s *Service) CreateBatch(product string, batchID *uint, rows []SaleRow) ...
+```
+
+见 `sale/service.go:60-73`。服务端没有校验：
+
+- 该批次是否存在；
+- 批次品类是否等于 `product`；
+- 该批次是否属于当前调用方（当前无鉴权，至少应校验前两项）。
+
+后果：
+
+1. 手工数据可以挂到别人的批次下，`DELETE /api/imports/:id` 会把它们一起删掉。
+2. 重新 `transform` 该批次时，`ReplaceBatch` 的 `DELETE WHERE batch_id=?` 也会删掉手工行，造成“数据莫名其妙消失”。
+
+**建议改法**：手工接口不接受客户端 `batch_id`，由服务端创建 `source=manual` 批次；若必须保留，先校验批次存在且 `category` 一致。
+
+**涉及文件**：`go_api/internal/sale/service.go`、`raw/repository.go`
+
+---
+
+### 4.8 同一批次并发 `transform` 可产生重复明细（新增 #25）🆕
+
+`Transform` 的执行序列是：
+
+1. 读取批次与映射；
+2. `sale.Repository.ReplaceBatch`：事务内 `DELETE FROM sales WHERE batch_id=?`，再 `INSERT`。
+
+见 `sale/repository.go:20-30`。`sales` 上没有 `(batch_id, row_index)` 唯一约束（表里甚至没有 `row_index`），两个并发请求可能都完成 DELETE，然后各自 INSERT，最终明细翻倍。并发“转换 + 删除批次”也可能留下孤儿行。
+
+**建议改法**：
+
+- 在 `transform` 事务开始时对 `import_batches` 行加 `SELECT ... FOR UPDATE`，串行化同一批次操作；或
+- 使用 PostgreSQL advisory lock（按 batch_id）；或
+- 给 `sales` 增加 `row_index` 并加 `(batch_id, row_index)` 唯一约束，配合 upsert。
+
+**涉及文件**：`go_api/internal/mapping/service.go`、`sale/repository.go`、`raw/repository.go`
+
+---
+
+## 5. P2：一致性与可维护性
+
+### 5.1 上游 4xx 被压成 502（原 #13）❌
+
+`analytics/client.go:84-85` 仍把上游所有 `>=300` 统一变成 `python returned %d`，handler 再统一返回 `502 / 20001`。
+
+实际后果：
 
 | 场景 | 真实原因 | 用户看到 |
 |---|---|---|
-| `top-products?limit=1000` | 超出 Python 校验上限（422） | 分析服务不可用（502） |
-| 上传超过 10000 行 | Go 拒绝（400） | 服务不可用（502），原因丢失 |
+| `top-products?limit=1000` | Python 校验拒绝（422） | 分析服务不可用（502） |
+| 未知品类 | Python 返回 404 | Go 已单独映射为 404（这部分正确） |
+| 上传超过 10000 行 | Go/Python 拒绝（400） | Python 侧又包成 502（见 5.12） |
 
-客户端错误被报成服务端故障，是排障成本最高的设计缺陷。
-
-**建议改法**
-
-- 把上游 4xx 映射回 Go 的 400 并透传 `detail`。
-- 只在连接失败、超时、5xx 时返回 502。
+**建议改法**：4xx 映射回 400 并透传 `detail`；只在连接失败、超时、5xx 时返回 502。
 
 **涉及文件**：`go_api/internal/analytics/client.go`
 
 ---
 
-### 4.2 `limit` 处理规则不一致
+### 5.2 `limit` 处理规则不一致（原 #14）❌
 
 | 接口 | Go 侧 | Python 侧 | 结果 |
 |---|---|---|---|
-| `top-products` | 只兜底 `<=0`，无上限 | `ge=1, le=500` | 超限返回 502 |
-| `brands` | 只兜底 `<=0`，无上限 | `ge=1, le=50` | 超限返回 502 |
-| `attributes` | 夹到 100 | `ge=1, le=100` | 正常 |
+| `top-products` | 只兜底 `<=0`，无上限（`handler.go:44-49`） | `ge=1, le=500` | 超限返回 502 |
+| `brands` | 只兜底 `<=0`，无上限（`handler.go:62-66`） | `ge=1, le=50` | 超限返回 502 |
+| `attributes` | 夹到 100（`handler.go:103-109`） | `ge=1, le=100` | 正常 |
 
-**建议改法**
-
-- Go 侧统一做上下限收敛，收敛后再透传；或在 Go 侧直接返回 400 并给出允许范围。
+**建议改法**：Go 侧统一做上下限收敛（或直接 400 并给出允许范围），不要再依赖上游 422。
 
 **涉及文件**：`go_api/internal/analytics/handler.go`
 
 ---
 
-### 4.3 `attributes` 的 `productor` 参数被静默丢弃
+### 5.3 `attributes` 的 `productor` 仍被静默丢弃（原 #15）◐
 
-`python_code/app/api/analytics.py` 的 `/attributes` 没有 `productor` 形参，FastAPI 会忽略未知 query 参数；而 Go 侧 `filterFrom` 会照常透传。
+Go 侧 `filterFrom` 会透传 `productor`（`analytics/handler.go:20-27`），但 Python 的 `/attributes` 没有该形参（`python_code/app/api/analytics.py:60-72`），`get_attribute_breakdown` 也没有接收它（`service.py:156-162`）。FastAPI 会忽略未知 query 参数，调用方以为过滤生效，实际没有。
 
-`README.md` 写作「`productor` 适用全部接口」，与实际不符。
+README 已不再声称 `attributes` 支持 `productor`，文档侧修了一半，代码侧仍是静默丢弃。
 
-**建议改法**
+**建议改法**：要么在 Python 侧补 `productor` 并透传给 `_filters`，要么在 Go 侧明确拒绝该参数。
 
-- 要么在 Python 侧支持该参数（`_filters` 已有 `productor` 能力，只需透传）。
-- 要么在 Go 侧明确拒绝未知参数并修正 README。
-
-**涉及文件**：`python_code/app/api/analytics.py`、`python_code/app/modules/analytics/service.py`、`README.md`
+**涉及文件**：`python_code/app/api/analytics.py`、`python_code/app/modules/analytics/service.py`
 
 ---
 
-### 4.4 时间参数全链路零校验
+### 5.4 时间参数全链路零校验（原 #16）❌
 
-`start_month` / `end_month` 从 Go 到 Python 全程只用 `str`，没有正则校验。
+`start_month` / `end_month` 从 Go 到 Python 全程只当字符串用，没有正则校验。传 `2024-1` 不会报错，而 `month >= '2024-1'` 在字符串比较下会产生静默错误结果。写入侧有 `^\d{4}-(0[1-9]|1[0-2])$` 校验（`mapping/transform.go:15`、`sale/service.go:9`），读取侧没有，两侧不对称。
 
-传 `2024-1` 不会报错，而 `month >= '2024-1'` 在字符串比较下会产生**静默错误结果**。写入侧有正则校验，读取侧没有，两侧不对称。
-
-**建议改法**
-
-- 在 Go handler 层统一用 `^\d{4}-(0[1-9]|1[0-2])$` 校验，不合法返回 400。
-- 或改用 `date` 类型的第一天存储，从类型上避免字符串比较问题。
+**建议改法**：在 Go handler 层统一校验，不合法返回 400；或改用 `date` 类型存储每月第一天，从类型上避免字符串比较。
 
 **涉及文件**：`go_api/internal/analytics/handler.go`
 
 ---
 
-### 4.5 数据库层零约束
+### 5.5 数据库层零约束（原 #17）❌
 
 | 缺失项 | 位置 | 后果 |
 |---|---|---|
-| `sales.product_id` 外键 | `go_api/internal/sale/model.go` | 可产生指向不存在品类的孤儿行 |
-| `sales.batch_id` 外键 | `go_api/internal/sale/model.go` | 被删除批次的数据可能残留 |
-| `month` 的 `CHECK` | `go_api/internal/sale/model.go` | 非标准格式可入库 |
-| `status` 枚举 | `go_api/internal/raw/model.go` | `?status=随便` 返回空列表而非 400 |
+| `sales.product_id` 外键 | `sale/model.go:12` | 可产生指向不存在品类的孤儿行 |
+| `sales.batch_id` 外键 | `sale/model.go:13` | 被删除批次的数据可能残留 |
+| `month` 的 `CHECK` | `sale/model.go:18` | 非标准格式可入库 |
+| `status` 枚举 | `raw/model.go:18` | `?status=随便` 返回空列表而非 400 |
 
-`AutoMigrate` 因模型没有关联字段，不会自动建外键。
+`router.MustMigrate`（`router/router.go:75-92`）只做 `AutoMigrate` 和 GIN 索引，模型没有关联字段，不会自动建外键。
 
-**建议改法**
+**建议改法**：
 
-- 补外键（`ON DELETE CASCADE` 或 `RESTRICT`，取决于业务语义）。
+- 补外键（`ON DELETE CASCADE` 或 `RESTRICT`，按业务语义定）。
 - 补 `CHECK (month ~ '^\d{4}-(0[1-9]|1[0-2])$')`。
 - `status` 用 `CHECK IN (...)` 或 PG 枚举类型约束。
+- handler 层显式校验 `status` 白名单。
 
-**涉及文件**：`go_api/internal/sale/model.go`、`go_api/internal/raw/model.go`、`go_api/internal/router/router.go`
-
----
-
-### 4.6 `PurgeBatch` 破坏自身分层约定
-
-`docs/architecture.md` 第 7 节声明：
-
-> repository 独占数据访问
-> 依赖方向（严格单向）
-
-但 `raw.Repository.PurgeBatch` 直接执行 `DELETE FROM sales`。注释给出的理由（跨层删除需同一事务）是正确的，但这恰恰说明**层边界画错了**：这属于 Unit of Work 的职责。
-
-另外 `mapping` 声称「消费方定义接口」，但 `SaleWriter` 的签名直接使用 `sale.SaleRow`、`RawReader` 使用 `raw.ImportBatch`，接口只隔离了方法，没有隔离类型。
-
-**建议改法**
-
-- 加外键 `ON DELETE CASCADE`，让删除由数据库保证，`PurgeBatch` 只删批次表。
-- 或引入显式的事务协调者（Unit of Work），由上层组合多个 repository 调用。
-
-**涉及文件**：`go_api/internal/raw/repository.go`、`go_api/internal/mapping/service.go`
+**涉及文件**：`go_api/internal/sale/model.go`、`raw/model.go`、`router/router.go`、`raw/handler.go`
 
 ---
 
-### 4.7 没有真正的 ADS 层
+### 5.6 `PurgeBatch` 跨层删除，`uow` 仍是死代码（原 #18）❌
 
-文档把 `analytics` 报表等同于 ADS。但 ADS 的本义是**物化的**应用层结果表，而现在是每次请求现算。
+`raw.Repository.PurgeBatch` 仍直接执行 `DELETE FROM sales`（`raw/repository.go:93-108`），与架构文档“repository 独占数据访问 / 严格单向依赖”冲突。
 
-**影响**
+本次提交新增了 `go_api/internal/common/uow/uow.go`，但全仓库没有任何 `import` 引用。它没有解决问题，只是增加了未使用代码。
 
-- 报表口径没有版本，无法复现历史报表。
-- DWS 直接暴露给 API，后续若要加缓存、快照、导出，缺少落点。
+另外 `mapping` 声称“消费方定义接口”，但 `SaleWriter` 的签名直接使用 `sale.SaleRow`、`RawReader` 使用 `raw.ImportBatch`，类型没有隔离。
 
-**建议改法**
+**建议改法**：
 
-- 若短期不改，把文档表述改成「ADS = 查询服务」以免概念混淆。
-- 若需长期演进，为高频报表建立结果表或物化视图。
+- 加 `ON DELETE CASCADE` 外键，让删除由数据库保证，`PurgeBatch` 只删批次表；
+- 或真正引入 Unit of Work，把跨 repository 的事务放到 service 层；
+- 删除未使用的 `uow` 包，避免误导。
+
+**涉及文件**：`go_api/internal/raw/repository.go`、`go_api/internal/common/uow/uow.go`、`go_api/internal/mapping/service.go`
+
+---
+
+### 5.7 没有真正的 ADS 层（原 #19）❌
+
+`docs/architecture.md` 把 `analytics` 报表等同于 ADS，但它本质是查询服务，不是物化的应用层结果表。报表口径没有版本，无法复现历史报表；后续加缓存、快照、导出也缺少落点。
+
+**建议改法**：短期把文档表述改成“ADS = 查询服务”；长期为高频报表建立结果表或物化视图，并记录 `as_of`。
 
 **涉及文件**：`docs/architecture.md` 第 1 节
 
 ---
 
-### 4.8 Python + Pandas 的收益需要重新确认
+### 5.8 Python + Pandas 的收益需要重新确认（原 #20）❌
 
-五个分析接口全部是纯 SQL 聚合，Pandas 的实际贡献只有 `.to_dict(orient="records")` 与 `.iloc[0]`。
+五个分析接口仍是纯 SQL 聚合，Pandas 的贡献主要是 `to_dict(orient="records")` 和 `iloc[0]`。成本没有变化：多一个部署单元、多一次 HTTP 往返、`sales`/`dws_sales` schema 两份维护、Python 挂掉全部分析 502、错误语义翻译、与 Go 抢同一个数据库连接。
 
-**为此付出的成本**
-
-| 成本 | 说明 |
-|---|---|
-| 部署单元 | 多一个服务要运维、要监控 |
-| 网络跳转 | 每次分析多一次 HTTP 往返 |
-| schema 重复 | Python 直接读 `sales` / `dws_sales` / `products`，与 GORM model 两份维护，无 contract test |
-| 故障源 | Python 挂掉，全部分析接口返回 502 |
-| 错误语义翻译 | 第 4.1 条因此存在 |
-| 连接池竞争 | Python 与 Go 抢同一个 PostgreSQL 连接，而刷新持锁时正是分析最需要连接的时候 |
-
-**建议**
-
-- 回到原始需求确认：是否存在 ML、复杂透视、非结构化处理的诉求。
-- 若没有，考虑把分析直接放在 Go 侧。
-- 若有，应给 Python 明确定位（只做需要 Python 生态的分析），而不是继续代理纯 SQL。
+**建议**：回到需求确认是否存在 ML、复杂透视、非结构化处理。若没有，考虑把分析直接放进 Go；若有，给 Python 明确边界（只做需要 Python 生态的分析），不要继续代理纯 SQL。
 
 ---
 
-### 4.9 测试覆盖不足
+### 5.9 测试覆盖仍不足（原 #21）◐
 
 | 模块 | 现有测试 |
 |---|---|
-| `go_api/internal/mapping` | `service_test.go`、`transform_test.go`（纯函数） |
-| `go_api/internal/summary` | `service_test.go` |
-| `python_code/tests` | `test_analytics_filters.py` |
+| `go_api/internal/mapping` | `service_test.go`、`transform_test.go`（纯函数 / 假实现） |
+| `go_api/internal/summary` | `service_test.go`（3 个集成测试，依赖 `TEST_DATABASE_URL`，缺失时跳过） |
+| `python_code/tests` | `test_analytics_filters.py`（8 个用例） |
 | handler 层 | 无 |
 | 事务 / 幂等 / 并发 | 无 |
+| 解析边界（负数、NaN、小数销量） | 无 |
 
-集成测试依赖 `TEST_DATABASE_URL`，缺失时直接跳过。
+本轮实际运行：Go 测试通过、Python 8 个用例通过；数据库集成测试因未设置环境变量被跳过。
 
-**建议改法**
+**建议改法**：
 
-- 补 handler 层测试（参数校验、错误码映射）。
-- 补幂等测试（同一批次重复 `transform` 结果一致）。
-- 补并发测试（并发刷新与查询不产生错误数据）。
+- 补 handler 测试（参数校验、错误码映射、404/400/502）。
+- 补 `buildRow` 边界测试（#23）。
+- 补并发 `transform` 测试（#25）。
+- 补“失败不改状态 / 重复转换幂等 / 汇总刷新失败仍可重试”的集成测试。
+- 加 CI，至少跑 `go build ./... && go test ./... && python -m unittest`。
 
 **涉及文件**：`go_api/internal/*/`、`python_code/tests/`
 
 ---
 
-### 4.10 注释与实现不符
+### 5.10 注释、响应字段与实现不符（原 #22）◐
 
 | 位置 | 现状 |
 |---|---|
-| `go_api/internal/product/repository.go` | 注释写「获取 sales 表所有商品」，实际读 `products` 表 |
-| `go_api/internal/raw/repository.go` `ListColumns` | 用 `MIN(row_data->>key)` 作「样例值」，取到的是字典序最小值，不是真实首例 |
-| `GET /api/imports/:id` | 返回 `COUNT(raw_records)`，而批次表已有 `row_count`，两者可能不一致 |
+| `go_api/internal/router/router.go:54` | 注释写“获取 sales 表所有商品”，实际读 `products` 表 |
+| `go_api/internal/raw/repository.go:37` | `ListColumns` 用 `MIN(row_data->>key)` 作“样例值”，取到字典序最小值，不是真实首例 |
+| `go_api/internal/raw/handler.go:55-71` | `GET /api/imports/:id` 返回 `COUNT(raw_records)`，批次表已有 `row_count`，两者口径未统一说明 |
+| `python_code/app/modules/analytics/service.py:98` | `top-products` 的 `avg_price` 是挂牌价口径，未跟随 #3 拆分改名 |
+| `go_api/internal/config/config.go:34` | `python.timeout` 配置存在，但 `analytics.NewClient` 硬编码 10s（`client.go:26-28`），配置无效 |
 
-**建议改法**
-
-- 修正注释。
-- `ListColumns` 改为取真实首行值（如 `ORDER BY row_index` + `DISTINCT ON`）。
-- 行数统一口径，二选一并说明。
+**建议改法**：修正注释；`ListColumns` 改为 `ORDER BY row_index` 取真实首行；统一行数口径；`top-products` 明确字段名（`avg_listed_price` / `avg_selling_price`）；让 client 使用配置超时。
 
 ---
 
-## 5. 修改路线
+### 5.11 `attrs` 的 key 命名与查询白名单不匹配（新增 #26）🆕
 
-按投入产出排序，前两项风险最低、收益最大。
+`attrs` 的 key 是**原始列名**（`mapping/service.go:143-149`），而属性查询侧：
 
-### 第一批：纯增量，不影响现有数据
+```python
+_KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+```
 
-- [ ] 4.1 错误语义分层（上游 4xx 映射回 400 并透传 detail）
-- [ ] 4.2 `limit` 统一收敛
-- [ ] 4.4 时间参数正则校验
-- [ ] 4.3 `attributes` 支持 `productor`，或修正 README
-- [ ] 2.4 `product_count` 改 `COUNT(DISTINCT (productor, name))`
-- [ ] 4.10 修正注释与样例值语义
+见 `analytics/service.py:124`，只允许 ASCII 字母、数字、下划线。
+
+后果：
+
+1. 源表列名是 `屏幕`、`内存`、`重量` 时，值会正常写进 `attrs`，但 `GET /api/analytics/attributes?key=屏幕` 永远 400；即使 `ALLOWED_ATTRS=*` 也不行，因为正则先拒绝了。
+2. 默认白名单是 `storage,screen,cpu,ram,color,weight`（`config.py:14`），而 `computer_sales.csv` 实际有 `memory,storage,cpu`，其中 `memory` 不在默认白名单里，按默认配置无法查询内存分布。
+3. `attrs` 的键集合没有登记接口，运维只能靠猜或翻数据库。
+
+**建议改法**：
+
+- 允许 Unicode key（限制长度 1–40，拒绝控制字符），或增加“源列名 → 属性别名”的注册表。
+- 提供 `GET /api/analytics/attributes/keys` 列出当前可查询的 key。
+- 默认 `ALLOWED_ATTRS` 与实际数据对齐，文档写明需要配置。
+
+**涉及文件**：`go_api/internal/mapping/service.go`、`python_code/app/modules/analytics/service.py`、`python_code/app/config.py`、`README.md`
+
+---
+
+### 5.12 上传接口的阻塞、限额与错误语义（新增 #27）🆕
+
+`python_code/app/api/importer.py:18-52`：
+
+1. 路由声明为 `async def`，但内部直接调用阻塞的 `pandas.read_csv` 和 `requests.post`，会卡住整个事件循环。
+2. 先把整个文件读进 pandas，再交给 Go 的 `max=10000` 行校验；文件大小和行数在 Python 侧没有预检，大文件可先打爆内存。
+3. `reader().parse(file.file)` 的解析异常没有捕获，坏 CSV 会变成 500。
+4. `requests.raise_for_status()` 把 Go 的 400（空行、超过 10000 行等客户端错误）包成 `ImporterFailedError`，最终返回 **502**，与 #13 是同一类错误语义问题。
+
+**建议改法**：
+
+- 把同步解析/转发放到线程池（`def` 端点或 `run_in_threadpool`），或改用异步 HTTP 客户端。
+- 限制上传字节数与最大行数，流式读取，超限直接 400。
+- 捕获解析异常并返回 400。
+- 区分上游 4xx/5xx，4xx 透传为 400 并带 `detail`。
+
+**涉及文件**：`python_code/app/api/importer.py`、`python_code/app/modules/importer/`
+
+---
+
+### 5.13 handler 错误码映射仍不统一（新增 #28）🆕
+
+| 入口 | 行为 | 问题 |
+|---|---|---|
+| `mapping/handler.go:56-63` | 只要不是 `ErrBatchNotFound`，一律 `400 / 10001` | 数据库错误、`UpdateStatus` 失败也被报成“参数错误” |
+| `sale/handler.go:23-27` | 所有错误一律 `500 / 10004` | 品类不存在、价格为负等客户端错误被报成服务器故障 |
+| `raw/handler.go:29-33` | 创建批次的持久化/序列化失败一律 500 | 没有区分可预期的参数错误与真正的内部错误 |
+
+**建议改法**：定义 sentinel/typed error（`ErrInvalidParam`、`ErrNotFound`、`ErrConflict`、`ErrInternal`），handler 用 `errors.Is` 映射；service 不再用字符串表达错误类别。
+
+**涉及文件**：`go_api/internal/common/errors/`、各 `handler.go`、各 `service.go`
+
+---
+
+### 5.14 README / architecture 与实现漂移（新增 #29）🆕
+
+| 文档位置 | 文档说法 | 实际 |
+|---|---|---|
+| `README.md:414-417` | `sales` 只返回 `avg_price` | 代码返回 `avg_listed_price`、`avg_selling_price`、`avg_price` 三个字段 |
+| `README.md:280` | `status` 支持 `loaded / mapped / failed` | 代码从不写 `failed`（`StatusFailed` 是死常量） |
+| `README.md:271` | “转换完成后建议显式调用 refresh” | `transform` 已自动刷新，重复调用只会多一次全量重建 |
+| `docs/architecture.md:431` | `loaded --> failed: 转换失败` | 代码失败时保持原状态，不写 `failed` |
+| `docs/architecture.md:229` | grain 能支撑全部现有报表 | `attributes` 扫 `sales`，见 #10 |
+| `docs/architecture.md:27` | 原始层“原样存 JSONB，不解析” | Python 已解析，见 #1 |
+| `docs/architecture.md:353-366` | repository 独占数据访问、严格单向 | `PurgeBatch` 直写 `sales`，见 #18 |
+| `.github/copilot-instructions.md:27,36` | “currently no test files” | 已有 Go/Python 测试 |
+
+**建议改法**：以本文第 2 节为准同步 README 与 architecture；把“失败状态”从状态图和 README 参数表中删除，或先实现真正的 `failed` 语义；文档中的能力声明必须能被代码或测试验证。
+
+---
+
+### 5.15 原始批次不校验品类（新增 #30）🆕
+
+`raw.Service.CreateBatch`（`raw/service.go:38-62`）只做 JSON 序列化与行数统计，不检查 `category` 是否存在于 `products`。
+
+后果：
+
+- 拼错品类（如 `comptuer`）会成功创建批次，直到 `transform` 才因为 `FindIDByName` 失败而报 400。
+- 这类批次会留在列表里，只能手工删除；如果前端按“导入成功”提示，用户会误以为数据已入库。
+
+**建议改法**：在原始层创建批次前校验品类存在（注入 `ProductResolver` 或由 service 调用 product repo），不存在返回 400；或明确设计为“原始层允许未知品类，转换时才校验”，并在 README 与响应中写清楚。
+
+**涉及文件**：`go_api/internal/raw/service.go`、`raw/handler.go`
+
+---
+
+## 6. 修改路线（按投入产出排序）
+
+### 第一批：低风险，先止血
+
+- [ ] #23 销量解析：`ParseInt` + `sales >= 0`，补边界测试。
+- [ ] #29 同步 README / architecture：删除 `failed` 状态、补 `avg_listed_price` / `avg_selling_price`、修正 grain 与“原始层不解析”的表述。
+- [ ] #22 修正路由注释、`ListColumns` 首行样例、行数口径、`top-products` 的 `avg_price` 命名、client 超时配置。
+- [ ] #14 `limit` 在 Go 侧统一收敛。
+- [ ] #16 `start_month` / `end_month` 正则校验。
+- [ ] #13 / #28 统一上游 4xx 与 handler 错误码映射。
 
 ### 第二批：直接影响报表正确性
 
-- [ ] 2.3 `avg_price` 拆成两个口径
-- [ ] 2.5 状态与数据放进同一事务
-- [ ] 2.6 `attrs` 改为装全部非标准列
-- [ ] 3.2 对账覆盖全部度量 + 分页
-- [ ] 2.2 金额改 `numeric`
+- [ ] #24 手工写入不再接受客户端 `batch_id`，由服务端建 `manual` 批次。
+- [ ] #5 残留：`ReplaceBatch` 与 `UpdateStatus` 同事务；删除 `StatusFailed`。
+- [ ] #25 并发 `transform` 串行化（批次行锁 / advisory lock）。
+- [ ] #26 属性 key 支持 Unicode 并增加 key 列表接口；默认白名单对齐实际数据。
+- [ ] #9 对账覆盖全部度量 + 分页/局部对账。
+- [ ] #30 原始层校验品类。
 
 ### 第三批：结构性调整
 
-- [ ] 3.1 汇总层改增量 + 异步
-- [ ] 2.7 手工写入纳入批次管理，补删除路径
-- [ ] 2.1 原始文件留存 + 文件指纹去重
-- [ ] 4.5 补外键与 CHECK 约束
-- [ ] 4.6 删除路径交给外键或 Unit of Work
-- [ ] 3.4 双口径在接口层面显式区分
+- [ ] #8 汇总层增量刷新 + 异步任务 + 复合索引。
+- [ ] #7 手工写入纳入批次管理，补删除/回滚路径。
+- [ ] #1 原始文件留存 + SHA-256 去重 + reader 版本。
+- [ ] #17 补外键、`CHECK`、状态枚举。
+- [ ] #18 删除交给外键或真正落地 Unit of Work；移除未使用的 `uow`。
+- [ ] #11 双口径在路径/响应中显式区分，补 `source` 与 `as_of`。
+- [ ] #27 上传接口线程池化、大小/行数限制、4xx 透传。
 
 ### 第四批：待需求确认后再定
 
-- [ ] 4.8 Python + Pandas 是否保留
-- [ ] 4.7 是否引入 ADS 物化层
-- [ ] 3.3 文档中 grain 的表述修正
-- [ ] 4.9 补齐测试
+- [ ] #20 Python + Pandas 是否保留。
+- [ ] #19 是否引入 ADS 物化层。
+- [ ] #10 grain 文档表述修正（若不做 `dws_sales_attrs`）。
+- [ ] #21 补 handler / 事务 / 并发测试并接入 CI。
 
 ---
 
-## 6. 需要先确认的问题
+## 7. 需要先确认的问题
 
-以下问题会影响修改方案的选择，建议先与需求方确认：
+1. 分析侧是否存在 ML、复杂透视、非结构化处理需求？答案决定 #20 是“保留 Python”还是“合并回 Go”。
+2. 报表是否需要复现历史口径？答案决定 #19 是否要引入 ADS 快照与 `as_of`。
+3. `top-products` 的 `avg_price` 是否要改成“平均成交价”？#3 已在汇总接口拆开，但热销商品接口仍是挂牌价口径。
+4. 手工写入（`POST /api/sales/batch`）是否仍需保留？若只是调试入口，可以直接下线，#7/#24 随之消失。
+5. 是否会部署多实例？答案决定汇总层刷新与 `transform` 串行化是否需要分布式锁。
+6. 原始文件留存的可接受成本是多少（数据库 bytea vs 对象存储）？答案决定 #1 的落盘方案。
+7. `attrs` 的属性 key 是否需要支持中文列名？若需要，#26 不能只靠白名单解决。
 
-1. 分析侧是否存在 ML、复杂透视、非结构化处理需求。答案决定第 4.8 条是「保留」还是「合并」。
-2. 报表是否需要复现历史口径。答案决定是否要引入 ADS 快照。
-3. 「平均单价」的业务定义是哪一个。答案决定第 2.3 条是「新增」还是「替换」。
-4. 手工写入（`POST /api/sales/batch`）是否仍需保留。若只是调试入口，可以直接下线，第 2.7 条随之消失。
-5. 是否会部署多实例。答案决定汇总层刷新是否需要分布式锁。
+---
+
+*本文档随架构演进更新；最近复核：2026-10-31，基线 `4df6303`。*
