@@ -20,7 +20,7 @@ cp python_code/.env.example python_code/.env
 # 2. 建库（只需一次）
 createdb db1
 
-# 3. 启动 Go，AutoMigrate 会自动建表并补齐 attrs 的 GIN 索引
+# 3. 启动 Go，AutoMigrate 会自动建表（含 raw_files）并补齐 attrs 的 GIN 索引
 cd go_api && go run ./cmd/server
 
 # 4. 另开终端启动 Python
@@ -94,6 +94,7 @@ Base URL：`http://localhost:8080`
 | 17 | GET | `/api/analytics/brands` | Query |
 | 18 | GET | `/api/analytics/monthly-trend` | Query |
 | 19 | GET | `/api/analytics/attributes` | Query |
+| 20 | POST | `/api/import-uploads` | Multipart |
 
 ---
 
@@ -191,6 +192,65 @@ curl -X POST http://localhost:8080/api/sales/batch \
 
 ## 4. 原始层（imports / raw）
 
+原始层由两张表组成：
+
+- `raw_files`：原始文件字节（`bytea`）与 SHA-256 指纹，用于重放和去重。
+- `raw_records`：解析后的行快照（JSONB），用于映射转换。
+
+文件上传有三种入口：
+
+| 入口 | 谁调用 | 说明 |
+|---|---|---|
+| `POST :8000/import/upload` | 普通用户 / 前端 | Python 读取文件、计算指纹、解析 rows，再转调 Go |
+| `POST :8080/api/import-uploads` | 已解析好 rows 的内部调用方 | 一次请求同时提交文件字节与 rows，属于内部接口，不建议直接暴露到公网 |
+| `POST :8080/api/imports` | 旧调用方 / 纯 JSON 场景 | 只提交 rows，不保存原始文件，不参与指纹去重 |
+
+### `POST /api/import-uploads`
+
+上传原始文件并写入批次。请求类型为 `multipart/form-data`。
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| `file` | 文件 | 是 | 最大 32MB | 原始文件字节 |
+| `category` | string | 是 | 1–50 字符 | 品类名 |
+| `source` | string | 否 | 1–255 字符 | 缺省使用文件名 |
+| `reader_version` | string | 否 | 最多 32 字符 | 解析器版本，如 `csv-v1`、`excel-v1` |
+| `file_hash` | string | 否 | 64 位十六进制 | 客户端计算的 SHA-256；服务端会重新计算并比对 |
+| `rows` | string | 是 | 1–10000 行 | 已解析行的 JSON 数组字符串 |
+
+服务端会重新计算文件 SHA-256，并执行去重：
+
+- 同一 `(category, file_hash)` 已存在批次时，返回已有批次，`duplicated` 为 `true`，不会重复写 `raw_records`。
+- 同一文件用于不同品类时，复用同一条 `raw_files`，新建一个批次。
+- 不提供 `file_hash` 时按文件内容计算，仍然参与去重。
+
+**响应 `data`**
+
+```json
+{ "batch_id": 13, "row_count": 168, "duplicated": false,
+  "file_hash": "bc9098f6d1d29c61a1d0ed338685306e78abbe14d032393bc1e0ab97cb7606da" }
+```
+
+重复上传时：
+
+```json
+{ "batch_id": 13, "row_count": 168, "duplicated": true,
+  "file_hash": "bc9098f6d1d29c61a1d0ed338685306e78abbe14d032393bc1e0ab97cb7606da" }
+```
+
+```bash
+# 直接调用 Go 时需要自己提供 rows
+curl -X POST http://localhost:8080/api/import-uploads \
+  -F 'file=@phone_sales.csv;type=text/csv' \
+  -F 'category=phone' \
+  -F 'reader_version=csv-v1' \
+  -F 'rows=<rows.json'
+```
+
+> 普通上传建议走 Python 的 `/import/upload`：它会完成 CSV/Excel 解析并自动提交 rows；直接调用 Go 的 `/api/import-uploads` 时，`rows` 必须由调用方保证与文件内容一致。
+
+> 已知限制：当前数据库的 `uk_batch_cat_file` 实际只约束 `raw_file_id`，同一文件跨品类复用会失败。修正 SQL 与测试步骤见 `docs/next-change-plan.md` 的 2.1 节。
+
 ### `POST /api/imports`
 
 写入一批原始数据（JSONB），不校验业务字段。
@@ -206,8 +266,10 @@ curl -X POST http://localhost:8080/api/sales/batch \
 **响应 `data`**
 
 ```json
-{ "batch_id": 2, "row_count": 400 }
+{ "batch_id": 2, "row_count": 400, "duplicated": false }
 ```
+
+> 该入口不保存原始文件，`file_hash` 为空，不参与文件指纹去重。
 
 ```bash
 curl -X POST http://localhost:8080/api/imports \
@@ -268,7 +330,7 @@ curl -X POST http://localhost:8080/api/imports \
 
 批次不存在 → `404 / 10002`；转换失败（缺字段、歧义映射、月份格式错误等）→ `400 / 10001`。
 
-> 转换完成后建议显式调用 `POST /api/summary/refresh` 重建汇总层。
+> `transform` 成功后会尝试自动重建汇总层；只有 `summary_refreshed=false` 时才需要手动调用 `POST /api/summary/refresh`。
 
 ### `GET /api/imports`
 
@@ -277,7 +339,7 @@ curl -X POST http://localhost:8080/api/imports \
 | 参数 | 位置 | 类型 | 必填 | 说明 |
 |---|---|---|---|---|
 | `category` | Query | string | 否 | 按品类过滤 |
-| `status` | Query | string | 否 | `loaded` / `mapped` / `failed` |
+| `status` | Query | string | 否 | `loaded` / `mapped`；`failed` 仅可能出现在旧数据中 |
 | `page` | Query | integer | 否 | 页码，从 1 开始，默认 1 |
 | `size` | Query | integer | 否 | 每页条数，默认 20，上限 200 |
 
@@ -285,9 +347,15 @@ curl -X POST http://localhost:8080/api/imports \
 
 ```json
 { "items": [ { "id": 9, "source": "computer_sales.csv", "category": "computer",
-               "status": "mapped", "row_count": 120, "created_at": "..." } ],
+               "status": "mapped", "row_count": 120,
+               "file_hash": "bc9098...",
+               "raw_file_id": 3,
+               "reader_version": "csv-v1",
+               "created_at": "..." } ],
   "total": 9, "page": 1, "size": 20 }
 ```
+
+旧批次没有原始文件，`file_hash` 为 64 个空格或空串，`raw_file_id` 为 `null`，`reader_version` 为空。
 
 ### `DELETE /api/imports/:id`
 
@@ -295,7 +363,7 @@ curl -X POST http://localhost:8080/api/imports \
 |---|---|---|---|---|
 | `id` | Path | integer | 是 | 批次 id |
 
-在同一个事务内删除该批次的 `sales` 明细行、`raw_records` 与 `import_batches` 记录，随后重建汇总层。**不可撤销**，重跑需要重新上传。
+在同一个事务内删除该批次的 `sales` 明细行、`raw_records` 与 `import_batches` 记录，随后重建汇总层。`raw_files` 中的原始文件不会随批次删除，保留用于审计和后续重放。**不可撤销**，重跑需要重新上传或从原始文件重放。
 
 **响应 `data`**
 
@@ -411,10 +479,14 @@ curl -X POST http://localhost:8080/api/mappings \
 ```json
 { "category": "computer", "start_month": "2024-01", "end_month": "2024-06",
   "brand_count": 3, "product_count": 8,
-  "total_sales": 1234567, "total_amount": 9876543.21, "avg_price": 5999.5 }
+  "total_sales": 1234567, "total_amount": 9876543.21,
+  "avg_listed_price": 5999.5, "avg_selling_price": 5888.8,
+  "avg_price": 5999.5 }
 ```
 
-`avg_price` 为按记录数加权的平均单价（`SUM(price_sum) / SUM(record_count)`）。
+- `avg_listed_price`：按记录数加权的挂牌均价（`SUM(price_sum) / SUM(record_count)`）。
+- `avg_selling_price`：按销量加权的成交均价（`SUM(total_amount) / SUM(total_sales)`）。
+- `avg_price`：兼容旧调用方，值等于 `avg_listed_price`。
 
 ### `GET /api/analytics/top-products`
 
@@ -518,6 +590,15 @@ curl 'http://localhost:8080/api/analytics/attributes?key=storage&category=comput
 
 | 方法 | 路径 | 参数 | 说明 |
 |---|---|---|---|
-| POST | `/import/upload` | form-data：`file`（必填，`.csv`/`.xls`/`.xlsx`）、`category`（必填） | 上传表格，解析后转调 Go 的 `POST /api/imports` |
+| POST | `/import/upload` | form-data：`file`（必填，`.csv`/`.xls`/`.xlsx`，默认上限 32MB）、`category`（必填） | 读取文件、计算 SHA-256、解析 rows，然后转调 Go 的 `POST /api/import-uploads` |
 | GET | `/analytics/*` | 同上文分析层的 Query 参数 | Go 的分析接口即代理到这里 |
 | GET | `/health` | 无 | 返回 `{"status":"ok"}` |
+
+Python 侧通过环境变量 `MAX_UPLOAD_BYTES` 控制上传上限，默认 `33554432`（32MB）。Python 上传响应比旧版本多两个字段：
+
+```json
+{ "code": 0, "msg": "ok",
+  "data": { "batch_id": 13, "row_count": 168, "category": "phone",
+            "source": "phone_sales.csv", "duplicated": false,
+            "file_hash": "bc9098f6d1d29c61a1d0ed338685306e78abbe14d032393bc1e0ab97cb7606da" } }
+```

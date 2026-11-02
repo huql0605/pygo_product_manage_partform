@@ -83,9 +83,15 @@ func buildRow(values map[string]string, lineNo int) (*sale.SaleRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("第 %d 行 price 不是数字: %q", lineNo, values["price"])
 	}
-	salesNum, err := strconv.ParseFloat(values["sales"], 64)
+	if price.IsNegative() {
+		return nil, fmt.Errorf("第 %d 行 price 不能为负: %s", lineNo, price.String())
+	}
+	salesNum, err := strconv.ParseInt(values["sales"], 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("第 %d 行 sales 不是数字: %q", lineNo, values["sales"])
+	}
+	if salesNum < 0 {
+		return nil, fmt.Errorf("第 %d 行 sales 不能为负 : %d", lineNo, salesNum)
 	}
 	if !monthRe.MatchString(values["month"]) {
 		return nil, fmt.Errorf("第 %d 行 month 格式错误: %q (需要 YYYY-MM)", lineNo, values["month"])

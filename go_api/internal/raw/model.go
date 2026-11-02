@@ -14,7 +14,7 @@ const (
 type ImportBatch struct {
 	ID            uint      `json:"id" gorm:"primarykey"`
 	Source        string    `json:"source" gorm:"not null"`
-	Category      string    `json:"category" gorm:"not null;index"`
+	Category      string    `json:"category" gorm:"not null;index;uniqueIndex:uk_batch_cat_file;priority:1"`
 	Status        string    `json:"status" gorm:"not null;default:loaded;index"`
 	RowCount      int       `json:"row_count" gorm:"not null;default:0"`
 	FileHash      string    `json:"file_hash" gorm:"type:char(64);not null;default:'';index"`
@@ -34,7 +34,7 @@ type RawRecord struct {
 
 type RawFile struct {
 	ID          uint      `json:"id" gorm:"primarykey"`
-	SHA256      string    `json:"sha256" gorm:"type:char(64);not null;uniqueindex"`
+	SHA256      string    `json:"sha256" gorm:"type:char(64);not null;uniqueIndex"`
 	Size        int64     `json:"size" gorm:"not null"`
 	Filename    string    `json:"filename" gorm:"type:text;not null"`
 	ContentType string    `json:"content_type" gorm:"type:text;not null;default:''"`

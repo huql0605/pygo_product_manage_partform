@@ -83,6 +83,10 @@ func MustMigrate(db *gorm.DB) {
 		log.Fatalf("migrate failed: %v", err)
 	}
 
+	if err := ensureBatchFileIndex(db);err !=nil{
+		log.Fatalf("%v",err)
+	}
+
 	// sales.attrs 的 GIN 索引。属性不进汇总层，聚合直接扫明细，靠它收敛扫描范围。
 	// 用 jsonb_path_ops：索引体积更小，且支持 @> 与 ? 两种操作符。
 	if err := db.Exec(
@@ -91,3 +95,28 @@ func MustMigrate(db *gorm.DB) {
 		log.Fatalf("create attrs index failed: %v", err)
 	}
 }
+
+func ensureBatchFileIndex(db *gorm.DB) error {
+	var exists bool
+	if err := db.Raw(`
+		SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE tablename = 'import_batches'
+			  AND indexname = 'uk_batch_cat_file'
+			  AND indexdef LIKE '%(category, raw_file_id)%'
+		)`).Scan(&exists).Error; err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`DROP INDEX IF EXISTS uk_batch_cat_file`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(`
+			CREATE UNIQUE INDEX uk_batch_cat_file
+			ON import_batches(category, raw_file_id)`).Error
+	})
+}
+

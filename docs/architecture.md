@@ -1,8 +1,8 @@
 # 架构说明：分层数据平台
 
-> 一句话定位：**Go + Python 构建的数据接入与分析平台，采用 ODS → DWD → DWS → ADS 分层思想，实现插件化接入与配置化字段映射。**
-
-技术栈：Go（Gin + GORM + PostgreSQL）负责 API 与事务；Python（FastAPI + Pandas）负责分析与接入；两者通过 REST 解耦，`X-Request-ID` 跨语言串联日志。
+> 一句话定位：**Go + Python 构建的数据接入与分析平台，采用 ODS → DWD → DWS → 查询服务的分层思想，实现文件留存、指纹去重、配置化字段映射与汇总报表。**
+>
+> 技术栈：Go（Gin + GORM + PostgreSQL）负责 API、事务与原始层落库；Python（FastAPI + Pandas）负责文件接入、解析与分析查询；两者通过 REST 解耦，`X-Request-ID` 跨语言串联日志。
 
 ---
 
@@ -10,61 +10,69 @@
 
 ```mermaid
 flowchart LR
-    CSVS["CSV / Excel / API"] --> ACC["接入层<br/>importer"]
-    ACC --> RAW["原始层 ODS<br/>raw_records (JSONB)"]
+    SRC["CSV / Excel"] --> ACC["接入层<br/>Python importer"]
+    ACC --> FILE["原始文件层<br/>raw_files (bytea + sha256)"]
+    ACC --> RAW["原始行层<br/>raw_records (JSONB)"]
+    FILE --> RAW
     RAW --> MAP["映射层<br/>field_mappings"]
-    MAP --> STD["明细层 DWD<br/>sales"]
-    STD --> DWS["汇总层 DWS<br/>dws_sales"]
-    DWS --> ANA["分析层 ADS<br/>analytics"]
+    MAP --> DWD["明细层 DWD<br/>sales"]
+    DWD --> DWS["汇总层 DWS<br/>dws_sales"]
+    DWS --> ANA["查询服务<br/>analytics"]
+    DWD --> ATTR["探索口径<br/>attributes"]
 
     classDef layer fill:#eef,stroke:#668
-    class ACC,RAW,MAP,STD,DWS,ANA layer
+    class ACC,FILE,RAW,MAP,DWD,DWS,ANA,ATTR layer
 ```
 
 | 层 | 职责 | 变化频率 |
 |---|---|---|
-| 接入层 | 把文件读成「行」 | 加新数据源时改 |
-| 原始层 | **原样存 JSONB，不解析** | 几乎不变 |
+| 接入层 | 接收文件、计算指纹、解析成行 | 加新数据源时改 |
+| 原始文件层 | 保存原始字节和 SHA-256，支持重放与去重 | 几乎不变 |
+| 原始行层 | 保存解析后的行快照，列名保持源表写法 | 解析规则变化时追加版本 |
 | 映射层 | 用户列名 → 系统标准字段 | 每个来源可不同 |
 | 明细层 | 统一结构，供分析 | 加新字段时改 |
 | 汇总层 | 预聚合，加速报表 | 加新指标/粒度时改 |
-| 分析层 | 聚合、报表 | 加新报表时改 |
+| 查询服务 | 聚合、报表，不物化结果 | 加新报表时改 |
 
-**核心洞察**：用户输入永远先进原始层，**永远不直接进标准层**。这是解决「表格一变就出 bug」的根本方法。
+**核心约束**：用户输入先进入原始文件层和原始行层，再经过映射进入明细层。原始字节是最终真相，`raw_records` 是可重算的解析快照，`sales` 与 `dws_sales` 都是派生数据。
 
 **与数仓分层的对应**：
 
 | 数仓分层 | 本项目 |
 |---|---|
-| ODS（原始层） | `raw_records`（JSONB，列名原样） |
+| ODS（原始层） | `raw_files`（原始字节 + SHA-256）与 `raw_records`（解析快照） |
 | DWD（明细层） | `sales`（映射后的标准明细） |
 | DWS（汇总层） | `dws_sales`（按 grain 预聚合） |
-| ADS（应用层） | `analytics` 报表（Python 查询） |
+| ADS（应用层） | `analytics` 查询服务；当前没有物化结果表 |
 
 ---
 
-## 2. 端到端流程（七个阶段）
+## 2. 端到端流程
 
 ```mermaid
 flowchart TD
-    CSV["phone_sales.csv<br/>productor,name,price,sales,month"]
+    CSV["phone_sales.csv"]
 
     subgraph L1["① 接入层 · Python"]
-        P1["pd.read_csv(dtype=str, keep_default_na=False)<br/>不改列名、不转类型"]
-        P2["df.to_dict(orient=records)<br/>每行变成字典"]
-        P3["POST /api/imports<br/>source, category, rows"]
-        P1 --> P2 --> P3
+        P1["读取文件字节一次<br/>限制 32MB"]
+        P2["sha256(content)"]
+        P3["pd.read_csv(BytesIO(content))<br/>dtype=str, keep_default_na=False"]
+        P4["df.to_dict(orient=records)"]
+        P5["POST /api/import-uploads<br/>multipart: file + rows + category + file_hash + reader_version"]
+        P1 --> P2 --> P3 --> P4 --> P5
     end
 
-    subgraph L2["② 原始层 · Go — 只搬运，不解析列名"]
-        R1["raw.Handler.CreateImport<br/>ShouldBindJSON + Validate"]
-        R2["raw.Service.CreateBatch<br/>逐行 json.Marshal + 编号 row_index"]
-        R3["事务 repo.CreateBatch"]
-        B1[("import_batches<br/>id, source, category<br/>status=loaded, row_count")]
-        B2[("raw_records<br/>batch_id, row_index<br/>row_data jsonb")]
+    subgraph L2["② 原始层 · Go"]
+        R1["raw.Handler.UploadImport<br/>限制请求体、文件、行数"]
+        R2["raw.Service.CreateBatchFromFile<br/>服务端重算 SHA-256"]
+        R3["事务 repo.CreateBatchWithFile<br/>raw_files 插入或复用<br/>import_batches 插入或复用<br/>raw_records ×N"]
+        R4[("raw_files<br/>sha256, size, filename, content")]
+        R5[("import_batches<br/>file_hash, raw_file_id, reader_version")]
+        R6[("raw_records<br/>row_data jsonb")]
         R1 --> R2 --> R3
-        R3 --> B1
-        R3 --> B2
+        R3 --> R4
+        R3 --> R5
+        R3 --> R6
     end
 
     subgraph L3["③ 看清有哪些列"]
@@ -80,123 +88,156 @@ flowchart TD
         M1 --> M2 --> M3
     end
 
-    subgraph L5["⑤ 映射层 · 转换 — 真正解析列名的地方"]
+    subgraph L5["⑤ 转换 · 映射层"]
         T1["POST /api/imports/:id/transform"]
         T2["读 category + 映射规则"]
         T3["读 raw_records 全部行"]
-        T4["逐行 resolveRow<br/>1 显式规则<br/>2 恒等回退<br/>3 未匹配记为 ignored"]
-        T5["buildRow<br/>price 转 float, sales 转 int64<br/>month 校验 YYYY-MM"]
-        T6["事务 sale.Service.ReplaceBatch<br/>DELETE WHERE batch_id=?<br/>再 INSERT"]
+        T4["逐行 resolveRow<br/>1 显式规则<br/>2 恒等回退<br/>3 未匹配记入 attrs"]
+        T5["buildRow<br/>price 转 decimal<br/>sales 转 int64（当前仍有截断问题）<br/>month 校验 YYYY-MM"]
+        T6["事务 sale.Service.ReplaceBatch<br/>DELETE WHERE batch_id=? 再 INSERT"]
         T7["import_batches.status = mapped"]
         T1 --> T2 --> T3 --> T4 --> T5 --> T6 --> T7
     end
 
-    SALES[("sales<br/>product_id, batch_id<br/>productor, name, price<br/>sales, month")]
+    SALES[("sales<br/>product_id, batch_id<br/>productor, name, price<br/>sales, month, attrs")]
 
-    subgraph L6["⑥ 汇总层 · DWS（全量重建）"]
+    subgraph L6["⑥ 汇总层 · DWS（当前全量重建）"]
         W1["POST /api/summary/refresh<br/>或 transform 成功后自动触发"]
         W2["事务：TRUNCATE + INSERT SELECT<br/>GROUP BY (product_id, productor, name, month)"]
-        W3[("dws_sales<br/>可加度量：total_sales / total_amount<br/>分子分母：price_sum / record_count")]
+        W3[("dws_sales<br/>total_sales / total_amount<br/>price_sum / record_count")]
         W1 --> W2 --> W3
     end
 
-    subgraph L7["⑦ 分析层"]
+    subgraph L7["⑦ 查询服务"]
         A1["GET /api/analytics/*"]
         A2["Go analytics.Client<br/>透传 X-Request-ID"]
-        A3["Python FastAPI<br/>pandas 读 dws_sales"]
+        A3["Python FastAPI<br/>pandas 读 dws_sales 或 sales"]
         A1 --> A2 --> A3
     end
 
     CSV --> P1
-    P3 --> R1
-    B2 --> C1
-    B2 --> T3
+    P5 --> R1
+    R6 --> C1
+    R6 --> T3
     M3 --> T2
     T6 --> SALES
     SALES --> W1
     W3 --> A1
+    SALES --> A3
 ```
 
 ---
 
 ## 3. 数据形态流转
 
-同一条数据一路的形态变化：
-
 ```mermaid
 flowchart LR
-    S1["CSV 行<br/>Apple,iPhone 15 Pro,<br/>7114.41,11556,2024-01"]
-    S2["pandas dict<br/>值是字符串"]
-    S3["jsonb 存储<br/>键被重排<br/>值仍是字符串"]
-    S4["resolveRow<br/>列名转标准字段名"]
-    S5["SaleRow<br/>类型已转换"]
-    S6["sales 表行<br/>+ product_id, batch_id"]
-    S7["dws_sales 行<br/>按 grain 聚合"]
+    S1["CSV 原始字节"]
+    S2["raw_files.content<br/>bytea + sha256"]
+    S3["pandas dict<br/>值是字符串"]
+    S4["raw_records.row_data<br/>jsonb 解析快照"]
+    S5["resolveRow<br/>列名转标准字段"]
+    S6["SaleRow<br/>类型已转换"]
+    S7["sales 行"]
+    S8["dws_sales 行"]
 
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
+    S1 --> S2
+    S1 --> S3 --> S4
+    S2 --> S3
+    S4 --> S5 --> S6 --> S7 --> S8
 ```
 
-| 阶段 | 数据形态 | **列名状态** | 值类型 |
+| 阶段 | 数据形态 | 列名状态 | 值类型 |
 |---|---|---|---|
-| ① CSV | 文本行 | `productor,name,price,sales,month` | 文本 |
-| ① pandas | `DataFrame` | 原样 | 文本（`dtype=str`） |
-| ① dict | `{productor: Apple, ...}` | 原样 | 文本 |
-| ② HTTP JSON | 同 dict | 原样 | 文本 |
-| ② `raw_records.row_data` | **jsonb** | **原样**（jsonb 重排键顺序） | 文本 |
-| ⑤ `resolveRow` | `map[string]string` | **翻译成标准字段名** | 文本 |
-| ⑤ `buildRow` | `sale.SaleRow` | 标准字段 | **已转换** |
-| ⑤ `sales` 行 | 关系表列 | 标准字段 | 关系类型 |
-| ⑥ `dws_sales` 行 | 聚合结果 | 标准字段（维度） | 数值 + 分子分母 |
+| 上传 | 原始字节 | 原样 | 字节 |
+| `raw_files.content` | `bytea` | 原样 | 字节 |
+| pandas | `DataFrame` | 原样 | 文本（`dtype=str`） |
+| `raw_records.row_data` | `jsonb` | 原样（jsonb 重排键顺序） | 文本 |
+| `resolveRow` | `map[string]string` | 翻译成标准字段名 | 文本 |
+| `buildRow` | `sale.SaleRow` | 标准字段 | `decimal` / `int64` / 字符串；销量整数校验尚待补 |
+| `sales` | 关系表列 | 标准字段 | 关系类型 |
+| `dws_sales` | 聚合结果 | 维度 + 度量 | 数值 + 分子分母 |
 
 ---
 
-## 4. 关键设计：列名被「处理」两次
+## 4. 文件指纹与幂等
+
+### 4.1 指纹来源
+
+SHA-256 在 Python 接入层对**原始字节**计算一次，Go 原始层收到文件后**重新计算**并以服务端结果为准。客户端提交的 `file_hash` 只用于一致性校验，不能替代服务端计算。
+
+### 4.2 存储模型
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `raw_files` | `sha256` 唯一、`size`、`filename`、`content bytea` | 同一份字节全局只存一份 |
+| `import_batches` | `file_hash`、`raw_file_id`、`reader_version` | 记录批次对应的文件和解析器版本 |
+| `raw_records` | `batch_id`、`row_index`、`row_data` | 解析快照，可随时从原始文件重算 |
+
+### 4.3 去重语义
+
+| 场景 | 行为 |
+|---|---|
+| 同一文件、同一品类 | 返回已有批次，`duplicated=true`，不新增 `raw_records` |
+| 同一文件、不同品类 | 复用 `raw_files`，新建批次 |
+| 文件内容变化 | SHA-256 变化，新建文件和批次 |
+| 旧 `POST /api/imports` | 不保存文件、不参与指纹去重 |
+| `reader_version` 变化 | 当前仍返回已有批次；需要重解析时走显式重放接口 |
+
+> 当前数据库中的批次唯一索引仍需修正为 `(category, raw_file_id)`，详见 `docs/design-review.md` 与 `docs/next-change-plan.md`。
+
+### 4.4 原始层不解析列名
+
+原始文件层保存字节，不关心列名；`raw_records` 保存解析后的键值，但**列名保持源表原始写法**。列名的翻译只发生在映射层。
+
+---
+
+## 5. 列名被处理两次
 
 ```mermaid
 flowchart TD
     K1["CSV 的列名<br/>品牌 / 厂商 / productor"]
-    K2["原始层<br/>不解析 — 原样存进 row_data"]
+    K2["原始行层<br/>原样存进 row_data"]
     K3["映射层<br/>翻译 — 品牌 转 productor"]
     K1 --> K2 --> K3
 ```
 
-| | 原始层 | 映射层 |
+| | 原始行层 | 映射层 |
 |---|---|---|
-| 对列名的态度 | **完全不碰** | **全部翻译** |
+| 对列名的态度 | 完全不碰 | 全部翻译 |
 | 依据 | 无 | `field_mappings` + 恒等回退 |
-| 列名出现在哪 | `row_data` 的**键** | 转换逻辑的**输入** |
-| 目的 | 保留真相，任意表格都能存 | 产出统一结构，分析层不关心来源 |
+| 列名出现在哪 | `row_data` 的键 | 转换逻辑的输入 |
+| 目的 | 保留源表结构 | 产出统一结构 |
 
 ### 列名解析的三级优先级
 
-```
-1. 显式规则      field_mappings: source_column → target_field
+```text
+1. 显式规则      field_mappings: source_column -> target_field
 2. 恒等回退      源列名本身就在标准字段白名单里
-3. 未匹配        记入 ignored_columns（数据不丢，只是本次转换用不上）
+3. 未匹配        记入 ignored_columns，同时值写入 sales.attrs
 ```
 
-**「多来源 → 同一目标字段」是被允许的**（不同商家用不同写法），所以：
+**多来源到同一目标字段是被允许的**：
 
-- 唯一约束是 `(category, source_column)`，**故意不加** `target_field` 唯一约束
-- 转换时按「这一行里实际出现了哪个源列」解析
-- 若一行里出现两个源列指向同一目标字段 → **报错**，不静默随机取值
+- 唯一约束是 `(category, source_column)`，故意不加 `target_field` 唯一约束。
+- 转换时按这一行里实际出现了哪个源列解析。
+- 若一行里出现两个源列指向同一目标字段，直接报错，不静默随机取值。
 
 ### 列顺序无关
 
-全程按**列名**匹配，与顺序无关：
-
-- Python：`to_dict(orient="records")` → 字典，顺序已丢
-- 存储：`jsonb` 会重排键（按长度 + 字典序）
-- Go：`map[string]any` + `range` 迭代顺序本身随机
+- Python 的 `to_dict(orient="records")` 已经丢失列顺序。
+- `jsonb` 会重排键顺序。
+- Go 使用 `map[string]any`，迭代顺序本身随机。
 
 ---
 
-## 5. 事务边界
+## 6. 事务边界
 
 ```mermaid
 flowchart LR
     subgraph TX1["事务 1 · 写入原始层"]
-        A1["INSERT import_batches"] --> A2["INSERT raw_records ×N"]
+        A1["INSERT raw_files<br/>或复用已有 sha256"] --> A2["INSERT import_batches<br/>或复用已有批次"]
+        A2 --> A3["INSERT raw_records ×N"]
     end
     subgraph TX2["事务 2 · 替换标准层"]
         B1["DELETE sales WHERE batch_id=?"] --> B2["INSERT sales ×N"]
@@ -208,65 +249,56 @@ flowchart LR
 
 | 事务 | 语义 | 收益 |
 |---|---|---|
-| 原始层写入 | 批次头 + 全部原始行，**全成或全败** | 不会出现「有批次没数据」 |
-| 标准层替换 | **先删后插** | **幂等**：同批次重复转换不翻倍 |
-| 汇总层重建 | **先清空再重算** | 汇总是派生数据，永远可重建 |
+| 原始层写入 | 文件、批次、原始行全成或全败 | 不出现有文件没批次、有批次没行 |
+| 标准层替换 | 先删后插 | 同批次重复转换不翻倍 |
+| 汇总层重建 | 先清空再重算 | 汇总是派生数据，永远可重建 |
 
-转换失败时：整批不写，`sales` 保持原样，批次状态不变。任何一行的问题都会带**行号**返回。
+转换失败时整批不写，`sales` 保持上一版，批次状态不变。任何一行的问题都会带行号返回。
 
 ---
 
-## 6. 汇总层（DWS）设计
+## 7. 汇总层（DWS）设计
 
-分析层如果每次都扫 `sales` 明细做聚合，数据量一大就会变慢。汇总层把常用聚合**预先算好**。
+分析层如果每次都扫 `sales` 明细做聚合，数据量一大就会变慢。汇总层把常用聚合预先算好。
 
-### 6.1 粒度
+### 7.1 粒度
 
-```
+```text
 dws_sales: (product_id, productor, name, month)
 ```
 
-选它的理由：**这是能支撑全部现有报表的最小维度组合**。
+这个粒度支撑四类结构化报表：
 
-- 再粗（只到 `productor, month`）→ 答不了 `top-products`（需要 `name`）
-- 再细（保留明细行）→ 那就还是明细表本身
+- 品牌排行：`GROUP BY productor`
+- 月度趋势：`GROUP BY month`
+- 热销商品：`GROUP BY productor, name`
+- 全局汇总：全表聚合
 
-细粒度可以「上卷」到任意粗粒度，反之不行：
+**属性报表不在这个粒度内**：`attributes` 依赖 `sales.attrs`，当前直接扫描明细，属于探索口径，不是确认口径。若要纳入确认口径，需要新增 `dws_sales_attrs(key, value, ...)` 辅助汇总表。
 
-| 报表 | 在 `dws_sales` 上怎么算 |
-|---|---|
-| 品牌排行 | `GROUP BY productor` |
-| 月度趋势 | `GROUP BY month` |
-| 热销商品 | `GROUP BY productor, name` |
-| 全局汇总 | 全表聚合 |
-
-### 6.2 可加性：为什么必须存分子分母
-
-数仓里的度量分三类，本项目实际踩到了「不可加」这一种：
+### 7.2 可加性：为什么存分子分母
 
 | 度量 | 类型 | 能否跨行 SUM |
 |---|---|---|
 | `total_sales = SUM(sales)` | 可加 | 是 |
 | `total_amount = SUM(price * sales)` | 可加 | 是 |
-| `min_price / max_price` | 可加 | 是（可再 MIN/MAX） |
-| **`avg_price`** | **不可加** | 否，`AVG(AVG(x)) ≠ AVG(x)` |
+| `min_price / max_price` | 可再 MIN/MAX | 是 |
+| `avg_price` | 不可加 | 否，`AVG(AVG(x)) != AVG(x)` |
 
-所以表里**不存 `avg_price`**，而是存分子分母：
+所以表里不存 `avg_price`，而是存分子分母：
 
+```text
+price_sum    = SUM(price)   # 挂牌价分子
+record_count = COUNT(*)     # 记录数分母
 ```
-price_sum    = SUM(price)   ← 分子
-record_count = COUNT(*)     ← 分母
-```
 
-任意层级的平均价 = `SUM(price_sum) / SUM(record_count)`
+任意层级的挂牌均价 = `SUM(price_sum) / SUM(record_count)`。
 
-验证：`SUM(price_sum) / SUM(record_count)` = 全体 price 之和 / 全体行数 = 明细层的 `AVG(price)` ✓
+成交均价 = `SUM(total_amount) / SUM(total_sales)`，由查询时计算。
 
-> `batch_count`（即 `COUNT(DISTINCT batch_id)`）同样不可加，只作为**血缘提示**展示，跨行 SUM 没有意义。
+`batch_count = COUNT(DISTINCT batch_id)` 只作为血缘提示，跨行 SUM 没有意义；手工批次 `batch_id IS NULL` 不计入。
 
-### 6.3 刷新策略：全量 vs 增量
-
-**当前采用方案 A：全量重建**
+### 7.3 刷新策略：当前全量重建
 
 ```sql
 BEGIN;
@@ -282,75 +314,51 @@ COMMIT;
 
 | 优点 | 缺点 |
 |---|---|
-| 逻辑极简，正确性一眼可见 | O(N) 全表扫描 |
-| 一个事务，天然原子 | 无法只更新局部 |
-| 无状态——任何时刻重跑都能修好 | |
+| 逻辑简单，正确性容易验证 | O(N) 全表扫描 |
+| 单事务原子 | 无法只更新局部 |
+| 无状态，可随时重跑 | 请求链路内同步执行，数据量大时阻塞分析读 |
 
-**将来可升级为方案 B：增量刷新**（只重算受影响的 grain）
+将来的增量刷新需要先求受影响的 grain，再从整个 `sales` 重算这些 grain，不能只重算该批次的行，因为同一 grain 可能由多个批次共同贡献。
 
-```sql
-CREATE TEMP TABLE affected AS
-SELECT DISTINCT product_id, productor, name, month
-FROM sales WHERE batch_id = ANY($1);
+触发时机：
+
+```text
+transform 成功           -> 自动刷新（mapping.Service.WithSummary 注入）
+POST /api/summary/refresh -> 手动 / 定时刷新
 ```
 
-> **关键陷阱**：同一个 `(品牌, 机型, 月份)` 可能由**多个批次**共同贡献，因此必须从**整个 `sales`** 重算这些 grain，而不能只重算该批次的行。
+刷新失败不会让 transform 失败，错误通过 `summary_error` 返回。
 
-**触发时机**：
+### 7.4 一致性
 
-```
-transform 成功           ──► 自动刷新（mapping.Service.WithSummary 注入）
-POST /api/summary/refresh ──► 手动 / 定时刷新
-```
-
-刷新失败**不会**让 transform 失败——明细已写入，汇总是派生数据，可以稍后重建（错误通过 `summary_error` 返回）。
-
-### 6.4 一致性
-
-**核心原则：明细是唯一真相来源，汇总是派生数据。不一致时重建汇总，绝不改明细。**
+核心原则：明细是唯一真相来源，汇总是派生数据。不一致时重建汇总，不改明细。
 
 | 风险 | 对策 |
 |---|---|
-| 刷新中断 | 单个事务内 `TRUNCATE + INSERT`，原子 |
-| 刷新时并发写入 | 单实例下靠事务；多实例需分布式锁 |
-| 有人直接改了 `sales` | 提供对账接口 `GET /api/summary/verify` |
+| 刷新中断 | 单事务内 `TRUNCATE + INSERT`，原子 |
+| 刷新时并发写入 | 单实例靠事务；多实例需要分布式锁 |
+| 有人直接改 `sales` | 对账接口 `GET /api/summary/verify` |
 | 汇总落后于明细 | `updated_at` + 重新 refresh |
 
-对账用双向 `EXCEPT`：
-
-```sql
-WITH detail AS (
-    SELECT product_id, productor, name, month, SUM(sales) AS total_sales
-    FROM sales
-    GROUP BY product_id, productor, name, month
-),
-dws AS (
-    SELECT product_id, productor, name, month, SUM(total_sales) AS total_sales
-    FROM dws_sales
-    GROUP BY product_id, productor, name, month
-)
-SELECT * FROM detail EXCEPT SELECT * FROM dws
-UNION ALL
-SELECT * FROM dws EXCEPT SELECT * FROM detail;
-```
-
-两个方向都为空 = 一致（接口返回 `ok: true`）。
+当前对账只比较 `total_sales`，覆盖范围需要扩展，详见设计评审。
 
 ---
 
-## 7. 代码位置对照
+## 8. 代码位置对照
 
 | 阶段 | 入口 | 核心逻辑 |
 |---|---|---|
-| ① 接入 | `python_code/app/modules/importer/` · `import_raw.py` | `CsvReader.parse` + `ImporterService` |
-| ② 原始层 | `go_api/internal/raw/handler.go` → `service.go` | `CreateBatch` + `repo.CreateBatch` |
-| ③ 列名 | `go_api/internal/raw/repository.go` | `ListColumns`（`jsonb_object_keys`） |
-| ④ 规则 | `go_api/internal/mapping/handler.go` → `service.go` | `Upsert` + 白名单校验 |
-| ⑤ 转换 | `go_api/internal/mapping/` | `Transform` → `resolveRow` / `buildRow` |
-| ⑥ 汇总 | `go_api/internal/summary/` | `RefreshAll`（全量重建）+ `Verify`（对账） |
-| ⑦ 分析 | `go_api/internal/analytics/` → `python_code/app/` | HTTP 代理 + pandas 聚合 |
+| 接入 | `python_code/app/api/importer.py` | 读取字节、SHA-256、`BytesIO` 解析、multipart 转发 |
+| 原始层路由 | `go_api/internal/raw/handler.go` | `CreateImport`（JSON）与 `UploadImport`（multipart） |
+| 原始层服务 | `go_api/internal/raw/service.go` | `CreateBatch`、`CreateBatchFromFile`、`buildRecords` |
+| 原始层仓储 | `go_api/internal/raw/repository.go` | `CreateBatch`、`CreateBatchWithFile`、`PurgeBatch` |
+| 列名 | `go_api/internal/raw/repository.go` | `ListColumns`（`jsonb_object_keys`） |
+| 映射规则 | `go_api/internal/mapping/` | `Upsert` + 白名单校验 |
+| 转换 | `go_api/internal/mapping/` | `Transform` -> `resolveRow` / `buildRow` |
+| 汇总 | `go_api/internal/summary/` | `RefreshAll` + `Verify` |
+| 分析 | `go_api/internal/analytics/` -> `python_code/app/` | HTTP 代理 + pandas 聚合 |
 
-### 依赖方向（严格单向）
+### 依赖方向
 
 ```mermaid
 flowchart LR
@@ -360,81 +368,82 @@ flowchart LR
     REPO --> MODEL["model"]
 ```
 
-- handler 只做 HTTP 入参/出参
-- service 承载业务规则与事务边界
-- repository 独占数据访问
-- 跨模块依赖由**消费方定义接口**（如 `mapping.RawReader` / `mapping.SaleWriter`），实现方隐式满足
+- handler 只做 HTTP 入参和出参。
+- service 承载业务规则与事务边界。
+- repository 独占数据访问。
+- 跨模块依赖由消费方定义接口，如 `mapping.RawReader`、`mapping.SaleWriter`。
 
 ---
 
-## 8. 接口清单
+## 9. 接口清单
 
 ### 接入层（Python）
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `POST` | `/import/upload` | 上传 CSV/Excel，解析后转发给 Go 原始层 |
+| `POST` | `/import/upload` | 上传 CSV/Excel，解析后转调 Go 的 `/api/import-uploads` |
 
 ### 原始层
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `POST` | `/api/imports` | 写入原始数据（原样，不解析） |
+| `POST` | `/api/import-uploads` | 上传原始文件与已解析 rows，保存字节并做指纹去重 |
+| `POST` | `/api/imports` | 只写 rows，不保存原始文件，不参与去重 |
+| `GET` | `/api/imports` | 分页列出批次 |
 | `GET` | `/api/imports/:id` | 该批次的原始行数 |
-| `GET` | `/api/imports/:id/columns` | 列出该批次出现过的列名 + 样本值 |
+| `GET` | `/api/imports/:id/columns` | 列出该批次出现过的列名和样本值 |
+| `DELETE` | `/api/imports/:id` | 删除批次、明细和原始行，保留原始文件 |
 
-### 映射层
+### 映射层与汇总层
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `POST` | `/api/mappings` | 配置/覆盖一条映射规则（upsert） |
+| `POST` | `/api/mappings` | 配置或覆盖一条映射规则 |
 | `GET` | `/api/mappings?category=` | 查看某品类的规则 |
-| `POST` | `/api/imports/:id/transform` | 原始层 → 明细层转换（幂等） |
+| `POST` | `/api/imports/:id/transform` | 原始层到明细层转换（幂等） |
+| `POST` | `/api/summary/refresh` | 全量重建 `dws_sales` |
+| `GET` | `/api/summary/verify` | 对账：明细与汇总比较 |
 
-### 汇总层
-
-| 方法 | 路径 | 作用 |
-|---|---|---|
-| `POST` | `/api/summary/refresh` | 全量重建 `dws_sales`（幂等） |
-| `GET` | `/api/summary/verify` | 对账：明细 vs 汇总，`ok:true` 表示一致 |
-
-### 明细层 / 分析层
+### 明细层与分析层
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `GET` | `/api/products` · `POST` `/api/products` | 品类管理 |
-| `POST` | `/api/sales/batch` | 明细层写入（调试/内部用） |
+| `GET` / `POST` | `/api/products` | 品类管理 |
+| `POST` | `/api/sales/batch` | 明细层直接写入（调试/内部用） |
 | `GET` | `/api/analytics/sales` | 销售汇总 |
 | `GET` | `/api/analytics/top-products` | 热销商品 |
 | `GET` | `/api/analytics/brands` | 品牌排行 |
 | `GET` | `/api/analytics/monthly-trend` | 月度趋势 |
+| `GET` | `/api/analytics/attributes` | 属性聚合（探索口径，扫 `sales`） |
 
 ---
 
-## 9. 数据库表
+## 10. 数据库表
 
 | 表 | 层 | 说明 |
 |---|---|---|
-| `import_batches` | 原始层 | 批次元信息：source / category / status / row_count |
-| `raw_records` | 原始层 | `row_data` **JSONB**，键即用户表格原始列名 |
+| `raw_files` | 原始层 | `sha256` 唯一；保存原始字节、文件名、大小、存储方式 |
+| `import_batches` | 原始层 | 批次元信息：source / category / status / row_count / file_hash / raw_file_id / reader_version |
+| `raw_records` | 原始层 | `row_data` JSONB，键即源表原始列名 |
 | `field_mappings` | 映射层 | 唯一 `(category, source_column)` |
-| `sales` | 明细层（DWD） | 统一结构，`batch_id` 可溯源 |
-| `dws_sales` | 汇总层（DWS） | 唯一 `(product_id, productor, name, month)`；含分子分母 |
-| `products` | 品类 | 品类维度（phone / laptop） |
+| `sales` | 明细层 | 统一结构，`batch_id` 可溯源，`attrs` 保存非标准列 |
+| `dws_sales` | 汇总层 | 唯一 `(product_id, productor, name, month)`，含分子分母 |
+| `products` | 品类 | 品类维度 |
 
 ### 批次状态流转
 
 ```mermaid
 stateDiagram-v2
-    [*] --> loaded: POST /api/imports
+    [*] --> loaded: POST /api/imports 或 /api/import-uploads
     loaded --> mapped: POST /api/imports/:id/transform
-    loaded --> failed: 转换失败
     mapped --> mapped: 重复转换（幂等）
 ```
 
+转换失败时保持原状态，不写 `failed`。旧数据中可能残留 `failed`，只作为历史状态展示。
+
 ---
 
-## 10. 可扩展性演示
+## 11. 可扩展性
 
 **场景：换个商家，列名不同**
 
@@ -445,20 +454,36 @@ stateDiagram-v2
 
 只需为 `category = phone` 补 5 条映射规则：
 
-```
-厂商 → productor   型号 → name   单价 → price   月销量 → sales   月份 → month
+```text
+厂商 -> productor   型号 -> name   单价 -> price   月销量 -> sales   月份 -> month
 ```
 
-**零代码改动**，两批数据产出完全同构的 `sales` 行。
+零代码改动，两批数据产出同构的 `sales` 行。
 
 **场景：加新字段（地区）**
 
-`sales` 加一列 `region`；映射规则加一条 `地区 → region`；分析时 `GROUP BY region`。只加字段，不改逻辑。
+`sales` 加一列 `region`；映射规则加一条 `地区 -> region`；分析时 `GROUP BY region`。
 
-**场景：接入 Excel / API**
+**场景：接入 Excel 或 API**
 
-接入层加一个 `ExcelImporter` / `APIImporter`，后面几层完全复用。这就是「开放扩展」的正确姿势。
+接入层新增一个 Reader 或 Importer，原始文件层、原始行层、映射层、汇总层完全复用。
+
+**场景：从原始文件重放**
+
+`raw_files` 保存了原始字节，解析规则升级后可以重新解析并生成新批次；当前尚未提供重放接口，属于下一阶段工作。
 
 ---
 
-*本文档随架构演进更新。*
+## 12. 已知限制
+
+- 原始文件统一保存在 PostgreSQL `bytea` 中，文件量增长会放大数据库体积。
+- 重复上传仍然会先在 Python 侧解析一次，再去 Go 侧判重。
+- `raw_files` 没有自动清理机制，删除批次不会删除原始文件。
+- `/api/import-uploads` 信任调用方提交的 `rows` 与文件内容一致，服务端不重新解析校验。
+- 汇总层仍在请求链路内全量重建，数据量大时会阻塞。
+- 分析层是查询服务，不是物化的 ADS，没有报表快照和口径版本。
+- 其余待修问题见 `docs/design-review.md` 与 `docs/next-change-plan.md`。
+
+---
+
+*本文档随架构演进更新；最近更新：2026-11-02，基线 `2fcebfe`。*
