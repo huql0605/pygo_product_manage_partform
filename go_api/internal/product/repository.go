@@ -36,3 +36,11 @@ func (r *Repository) FindIDByName(name string) (uint, error) {
 	}
 	return p.ID, nil
 }
+
+func (r *Repository) FindIDByNameTx(tx *gorm.DB, name string) (uint, error) {
+	var p Product
+	if err := tx.Select("id").First(&p, "name = ?", name).Error; err != nil {
+		return 0, err
+	}
+	return p.ID, nil
+}

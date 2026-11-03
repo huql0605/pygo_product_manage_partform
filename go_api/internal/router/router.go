@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/huql0605/go_api/internal/analytics"
+	"github.com/huql0605/go_api/internal/common/uow"
 	"github.com/huql0605/go_api/internal/config"
 	"github.com/huql0605/go_api/internal/mapping"
 	"github.com/huql0605/go_api/internal/middleware"
@@ -35,7 +36,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	rawSvc := raw.NewService(rawRepo).WithSummary(summarySvc)
 
 	mappingRepo := mapping.NewRepository(db)
-	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc).WithSummary(summarySvc)
+	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc).WithTx(uow.New(db)).WithSummary(summarySvc)
 
 	mh := mapping.NewHandler(mappingSvc)
 	rh := raw.NewHandler(rawSvc)
@@ -83,8 +84,8 @@ func MustMigrate(db *gorm.DB) {
 		log.Fatalf("migrate failed: %v", err)
 	}
 
-	if err := ensureBatchFileIndex(db);err !=nil{
-		log.Fatalf("%v",err)
+	if err := ensureBatchFileIndex(db); err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	// sales.attrs 的 GIN 索引。属性不进汇总层，聚合直接扫明细，靠它收敛扫描范围。
@@ -119,4 +120,3 @@ func ensureBatchFileIndex(db *gorm.DB) error {
 			ON import_batches(category, raw_file_id)`).Error
 	})
 }
-

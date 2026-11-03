@@ -121,15 +121,11 @@ func (s *Service) ListBatches(category, status string, page, size int) (*ListImp
 // DeleteBatch 删除批次及其明细行与原始数据，随后重建汇总层。
 // 删除不可撤销；重跑导入需要重新上传。
 func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
-	if _, err := s.repo.GetBatch(batchID); err != nil {
+	deletedSales, err := s.repo.PurgeBatch(batchID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrBatchNotFound
 		}
-		return nil, err
-	}
-
-	deletedSales, err := s.repo.PurgeBatch(batchID)
-	if err != nil {
 		return nil, err
 	}
 

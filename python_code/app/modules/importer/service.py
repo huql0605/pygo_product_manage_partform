@@ -9,10 +9,6 @@ class ImporterInvalidError(Exception):
     """ 上传内容或参数不合法，对应 HTTP 400"""
 
 
-class ImporterFaildError(Exception):
-    """ go 服务不可用， 对应 HTTP 502"""
-
-
 class ImporterFailedError(Exception):
     """导入失败"""
 
@@ -90,7 +86,7 @@ class ImporterService:
 
         body = resp.json()
         if body.get("code") != 0:
-            raise ImporterFaildError(body.get("msg","未知错误"))
+            raise ImporterFailedError(body.get("msg","未知错误"))
 
         payload = body.get("data") or {}
         return ImportResult(

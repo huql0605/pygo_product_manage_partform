@@ -97,7 +97,13 @@ func (r *Repository) ListBatches(category, status string, offset, limit int) ([]
 // 若拆成两个 repository 调用，中途失败会留下"明细已删、原始数据还在"的脏状态。
 func (r *Repository) PurgeBatch(id uint) (int64, error) {
 	var deletedSales int64
+
 	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var batch ImportBatch
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&batch, id).Error; err != nil {
+			return err
+		}
+
 		res := tx.Exec("DELETE FROM sales WHERE batch_id = ?", id)
 		if res.Error != nil {
 			return res.Error
@@ -167,4 +173,27 @@ func (r *Repository) CreateBatchWithFile(batch *ImportBatch, file *RawFile, reco
 		return tx.CreateInBatches(records, 500).Error
 	})
 	return dupilcated, err
+}
+
+func (r *Repository) GetBatchForUpdateTx(tx *gorm.DB, id uint) (*ImportBatch, error) {
+	if err := tx.Exec("SET LOCAL lock_timeout = '5s'").Error; err != nil {
+		return nil, err
+	}
+
+	var b ImportBatch
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&b, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (r *Repository) ListRecordsTx(tx *gorm.DB, batchID uint) ([]RawRecord, error) {
+	var out []RawRecord
+	err := tx.Where("batch_id = ?", batchID).Order("row_index").Find(&out).Error
+	return out, err
+}
+
+func (r *Repository) UpdateStatusTx(tx *gorm.DB, batchId uint, status string) error {
+	return tx.Model(&ImportBatch{}).Where("id = ?", batchId).Update("status", status).Error
 }

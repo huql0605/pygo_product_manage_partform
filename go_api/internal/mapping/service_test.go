@@ -21,6 +21,10 @@ func (f *fakeRules) ListByCategory(category string) ([]FieldMapping, error) {
 	return f.items, nil
 }
 
+func (f *fakeRules) ListByCategoryTx(_ *gorm.DB, category string) ([]FieldMapping, error) {
+	return f.items, nil
+}
+
 type fakeRaw struct {
 	batch     *raw.ImportBatch
 	batchErr  error
@@ -28,18 +32,18 @@ type fakeRaw struct {
 	statusLog []string
 }
 
-func (f *fakeRaw) GetBatch(id uint) (*raw.ImportBatch, error) {
+func (f *fakeRaw) GetBatchForUpdateTx(_ *gorm.DB, id uint) (*raw.ImportBatch, error) {
 	if f.batchErr != nil {
 		return nil, f.batchErr
 	}
 	return f.batch, nil
 }
 
-func (f *fakeRaw) ListRecords(batchID uint) ([]raw.RawRecord, error) {
+func (f *fakeRaw) ListRecordsTx(_ *gorm.DB, batchID uint) ([]raw.RawRecord, error) {
 	return f.records, nil
 }
 
-func (f *fakeRaw) UpdateStatus(batchID uint, status string) error {
+func (f *fakeRaw) UpdateStatusTx(_ *gorm.DB, batchID uint, status string) error {
 	f.statusLog = append(f.statusLog, status)
 	return nil
 }
@@ -51,7 +55,7 @@ type fakeSale struct {
 	err      error
 }
 
-func (f *fakeSale) ReplaceBatch(product string, batchID uint, rows []sale.SaleRow) (*sale.CreateBatchResult, error) {
+func (f *fakeSale) ReplaceBatchTx(_ *gorm.DB, product string, batchID uint, rows []sale.SaleRow) (*sale.CreateBatchResult, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, f.err
@@ -62,10 +66,16 @@ func (f *fakeSale) ReplaceBatch(product string, batchID uint, rows []sale.SaleRo
 	return &sale.CreateBatchResult{ProductID: 1, BatchID: &id, Inserted: len(rows)}, nil
 }
 
+type fakeTx struct{}
+
+func (fakeTx) Do(fn func(tx *gorm.DB) error) error {
+	return fn(nil)
+}
+
 // ---------- 测试辅助 ----------
 
 func newSvc(rules []FieldMapping, fr *fakeRaw, fs *fakeSale) *Service {
-	return NewService(&fakeRules{items: rules}, fr, fs)
+	return NewService(&fakeRules{items: rules}, fr, fs).WithTx(fakeTx{})
 }
 
 func rec(idx int, body string) raw.RawRecord {

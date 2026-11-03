@@ -7,23 +7,29 @@ import (
 	"github.com/huql0605/go_api/internal/raw"
 	"github.com/huql0605/go_api/internal/sale"
 	"github.com/huql0605/go_api/internal/summary"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
+type TxRunner interface {
+	Do(fu func(tx *gorm.DB) error) error
+}
+
 type RawReader interface {
-	GetBatch(id uint) (*raw.ImportBatch, error)
-	ListRecords(batchId uint) ([]raw.RawRecord, error)
-	UpdateStatus(batchID uint, status string) error
+	GetBatchForUpdateTx(tx *gorm.DB, id uint) (*raw.ImportBatch, error)
+	ListRecordsTx(tx *gorm.DB, batchId uint) ([]raw.RawRecord, error)
+	UpdateStatusTx(tx *gorm.DB, batchID uint, status string) error
 }
 
 type SaleWriter interface {
-	ReplaceBatch(product string, batchID uint, row []sale.SaleRow) (*sale.CreateBatchResult, error)
+	ReplaceBatchTx(tx *gorm.DB, product string, batchID uint, row []sale.SaleRow) (*sale.CreateBatchResult, error)
 }
 
 // RuleStore 映射规则的存取。*Repository 隐式实现。
 type RuleStore interface {
 	Upsert(m *FieldMapping) error
 	ListByCategory(category string) ([]FieldMapping, error)
+	ListByCategoryTx(tx *gorm.DB, category string) ([]FieldMapping, error)
 }
 
 type SummaryRefresher interface {
@@ -35,6 +41,12 @@ type Service struct {
 	raws    RawReader
 	sales   SaleWriter
 	summary SummaryRefresher
+	tx      TxRunner
+}
+
+func (s *Service) WithTx(tx TxRunner) *Service {
+	s.tx = tx
+	return s
 }
 
 func NewService(repo RuleStore, raws RawReader, sales SaleWriter) *Service {
@@ -82,15 +94,20 @@ type TransformResult struct {
 // 幂等：同批次重复转换只覆盖，不翻倍（靠 sale.Service.ReplaceBatch）。
 // 状态流转：成功 → mapped；转换失败不改状态——本轮未写入任何数据，库内仍是上一版。
 func (s *Service) Transform(batchID uint) (*TransformResult, error) {
-	res, err := s.transform(batchID)
+	if s.tx == nil {
+		return nil, fmt.Errorf("mapping: transaction runner未配置")
+	}
+
+	var res *TransformResult
+	err := s.tx.Do(func(tx *gorm.DB) error {
+		var err error
+		res, err = s.transformTx(tx, batchID)
+		return err
+	})
 	if err != nil {
-		// 转换失败时未写入任何数据，库内仍是上一版，status 保持原值即正确。
-		// 失败原因由返回的 error 承载（HTTP 层已映射为 400）。
-		return nil, err
+		return nil, normalizeTransformError(err)
 	}
-	if err := s.raws.UpdateStatus(batchID, raw.StatusMapped); err != nil {
-		return nil, err
-	}
+
 	if s.summary != nil {
 		if _, err := s.summary.Refresh(); err != nil {
 			res.SummaryError = err.Error()
@@ -99,22 +116,23 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 		}
 	}
 	return res, nil
+
 }
 
 // transform 只负责核心转换，不碰批次状态。
-func (s *Service) transform(batchID uint) (*TransformResult, error) {
-	batch, err := s.raws.GetBatch(batchID)
+func (s *Service) transformTx(tx *gorm.DB, batchID uint) (*TransformResult, error) {
+	batch, err := s.raws.GetBatchForUpdateTx(tx, batchID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, raw.ErrBatchNotFound
 		}
 		return nil, err
 	}
-	rules, err := s.ruleMap(batch.Category)
+	rules, err := s.ruleMapTx(tx, batch.Category)
 	if err != nil {
 		return nil, err
 	}
-	records, err := s.raws.ListRecords(batchID)
+	records, err := s.raws.ListRecordsTx(tx, batchID)
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +140,33 @@ func (s *Service) transform(batchID uint) (*TransformResult, error) {
 		return nil, fmt.Errorf("批次 %d 没有原始数据", batchID)
 	}
 
+	rows, ignoredSet, err := buildSalesRows(records, rules)
+	if err != nil {
+		return nil, err
+	}
+
+	replaceRes, err := s.sales.ReplaceBatchTx(
+		tx, batch.Category, batchID, rows,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.raws.UpdateStatusTx(
+		tx, batchID, raw.StatusMapped,
+	); err != nil {
+		return nil, err
+	}
+
+	return &TransformResult{
+		BatchID:        batchID,
+		Product:        batch.Category,
+		Inserted:       replaceRes.Inserted,
+		IgnoredColumns: sortedKeys(ignoredSet),
+	}, nil
+}
+
+func buildSalesRows(records []raw.RawRecord, rules map[string]string) ([]sale.SaleRow, map[string]struct{}, error) {
 	rows := make([]sale.SaleRow, 0, len(records))
 	ignoredSet := map[string]struct{}{}
 
@@ -129,11 +174,11 @@ func (s *Service) transform(batchID uint) (*TransformResult, error) {
 		lineNo := rec.RowIndex + 1
 		obj, err := decodeRow(rec.RowData)
 		if err != nil {
-			return nil, fmt.Errorf("第 %d 行 JSON 解析失败: %w", lineNo, err)
+			return nil, nil, fmt.Errorf("第 %d 行 JSON 解析失败: %w", lineNo, err)
 		}
 		values, ignored, err := resolveRow(obj, rules)
 		if err != nil {
-			return nil, fmt.Errorf("第 %d 行: %w", lineNo, err)
+			return nil, nil, fmt.Errorf("第 %d 行: %w", lineNo, err)
 		}
 
 		for _, col := range ignored {
@@ -149,27 +194,16 @@ func (s *Service) transform(batchID uint) (*TransformResult, error) {
 		}
 		row, err := buildRow(values, lineNo)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		row.Attrs = attrs
 		rows = append(rows, *row)
 	}
-
-	res, err := s.sales.ReplaceBatch(batch.Category, batchID, rows)
-	if err != nil {
-		return nil, err
-	}
-
-	return &TransformResult{
-		BatchID:        batchID,
-		Product:        batch.Category,
-		Inserted:       res.Inserted,
-		IgnoredColumns: sortedKeys(ignoredSet),
-	}, nil
+	return rows, ignoredSet, nil
 }
 
-func (s *Service) ruleMap(category string) (map[string]string, error) {
-	items, err := s.repo.ListByCategory(category)
+func (s *Service) ruleMapTx(tx *gorm.DB, category string) (map[string]string, error) {
+	items, err := s.repo.ListByCategoryTx(tx, category)
 	if err != nil {
 		return nil, err
 	}
@@ -178,4 +212,18 @@ func (s *Service) ruleMap(category string) (map[string]string, error) {
 		out[m.SourceColumn] = m.TargetField
 	}
 	return out, nil
+}
+
+var ErrBatchBusy = errors.New("批次正在转换，请稍后重试")
+
+func normalizeTransformError(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return raw.ErrBatchNotFound
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+		return ErrBatchBusy
+	}
+	return err
 }

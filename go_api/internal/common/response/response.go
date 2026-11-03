@@ -37,3 +37,7 @@ func InternalError(c *gin.Context, msg string) {
 func BadGateway(c *gin.Context, code int, msg string) {
 	Fail(c, http.StatusBadGateway, code, msg)
 }
+
+func Conflict(c *gin.Context, code int, msg string) {
+	Fail(c, http.StatusConflict, code, msg)
+}

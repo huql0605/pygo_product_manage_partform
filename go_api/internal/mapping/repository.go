@@ -28,3 +28,9 @@ func (r *Repository) ListByCategory(category string) ([]FieldMapping, error) {
 	err := r.db.Where("category = ?", category).Order("id").Find(&out).Error
 	return out, err
 }
+
+func (r *Repository) ListByCategoryTx(tx *gorm.DB, category string) ([]FieldMapping, error) {
+	var out []FieldMapping
+	err := tx.Where("category = ?", category).Order("id").Find(&out).Error
+	return out, err
+}

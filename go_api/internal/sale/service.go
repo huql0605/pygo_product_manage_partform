@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+
+	"gorm.io/gorm"
 )
 
 var monthRe = regexp.MustCompile(`^\d{4}-(0[1-9]|1[0-2])$`)
 
 type ProductResolver interface {
 	FindIDByName(name string) (uint, error)
+	FindIDByNameTx(tx *gorm.DB, name string) (uint, error)
 }
 
 type Service struct {
@@ -70,6 +73,28 @@ func (s *Service) CreateBatch(product string, batchID *uint, rows []SaleRow) (*C
 		return nil, err
 	}
 	return &CreateBatchResult{ProductID: productID, BatchID: batchID, Inserted: len(items)}, nil
+}
+
+func (s *Service) ReplaceBatchTx(tx *gorm.DB, product string, batchId uint, rows []SaleRow) (*CreateBatchResult, error) {
+	productID, err := s.products.FindIDByNameTx(tx, product)
+	if err != nil {
+		return nil, fmt.Errorf("品类 %q 不存在，请先创建商品", product)
+	}
+
+	items, err := s.buildItems(productID, &batchId, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.ReplaceBatchTx(tx, batchId, items); err != nil {
+		return nil, err
+	}
+
+	return &CreateBatchResult{
+		ProductID: productID,
+		BatchID:   &batchId,
+		Inserted:  len(items),
+	}, nil
 }
 
 func (s *Service) ReplaceBatch(product string, batchID uint, rows []SaleRow) (*CreateBatchResult, error) {

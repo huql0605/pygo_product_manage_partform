@@ -14,7 +14,7 @@ const (
 type ImportBatch struct {
 	ID            uint      `json:"id" gorm:"primarykey"`
 	Source        string    `json:"source" gorm:"not null"`
-	Category      string    `json:"category" gorm:"not null;index;uniqueIndex:uk_batch_cat_file;priority:1"`
+	Category      string    `json:"category" gorm:"not null;index;uniqueIndex:uk_batch_cat_file,priority:1"`
 	Status        string    `json:"status" gorm:"not null;default:loaded;index"`
 	RowCount      int       `json:"row_count" gorm:"not null;default:0"`
 	FileHash      string    `json:"file_hash" gorm:"type:char(64);not null;default:'';index"`

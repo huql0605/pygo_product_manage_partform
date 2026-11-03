@@ -212,13 +212,10 @@ func TestBuildRow(t *testing.T) {
 			},
 		},
 		{
-			name:   "sales 是小数：截断为整数",
-			values: withField(validValues, "sales", "11556.9"),
-			lineNo: 1,
-			want: &sale.SaleRow{
-				Productor: "Apple", Name: "iPhone 15 Pro",
-				Price: decimal.RequireFromString("7114.41"), Sales: 11556, Month: "2024-01",
-			},
+			name:    "sales 是小数：报错",
+			values:  withField(validValues, "sales", "11556.9"),
+			lineNo:  1,
+			errPart: "sales 不是数字",
 		},
 	}
 

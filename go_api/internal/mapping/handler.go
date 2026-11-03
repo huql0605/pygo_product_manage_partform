@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	stderrors "errors"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -54,8 +55,12 @@ func (h *Handler) Transform(c *gin.Context) {
 		return
 	}
 	res, err := h.svc.Transform(uint(id))
-	if err == raw.ErrBatchNotFound {
+	if stderrors.Is(err, raw.ErrBatchNotFound) {
 		response.NotFound(c, err.Error())
+		return
+	}
+	if stderrors.Is(err, ErrBatchBusy) {
+		response.Conflict(c, errors.CodeConflict, err.Error())
 		return
 	}
 	if err != nil {

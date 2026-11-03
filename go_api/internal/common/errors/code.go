@@ -7,4 +7,5 @@ const (
 	CodeUnauthorized = 10003 // 未登录/无权限
 	CodeInternal     = 10004 // 服务器内部错误
 	CodePythonDown   = 20001 // Python 分析服务不可用
+	CodeConflict     = 10005 // 资源冲突
 )
