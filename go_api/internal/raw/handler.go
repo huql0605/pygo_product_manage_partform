@@ -2,6 +2,7 @@ package raw
 
 import (
 	"encoding/json"
+	stderrors "errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -101,12 +102,12 @@ func (h *Handler) DeleteImport(c *gin.Context) {
 	}
 
 	res, err := h.svc.DeleteBatch(uint(id))
-	if err == ErrBatchNotFound {
-		response.NotFound(c, err.Error())
+	if stderrors.Is(err, ErrBatchBusy) {
+		response.Conflict(c, errors.CodeConflict, err.Error())
 		return
 	}
-	if err != nil {
-		response.InternalError(c, err.Error())
+	if stderrors.Is(err, ErrBatchNotFound) {
+		response.NotFound(c, err.Error())
 		return
 	}
 	response.Success(c, res)

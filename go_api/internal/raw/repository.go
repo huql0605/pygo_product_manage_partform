@@ -100,11 +100,15 @@ func (r *Repository) PurgeBatch(id uint) (int64, error) {
 
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var batch ImportBatch
+		res := tx.Exec("SET LOCAL lock_timeout = '5s';")
+		if res.Error != nil {
+			return res.Error
+		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&batch, id).Error; err != nil {
 			return err
 		}
 
-		res := tx.Exec("DELETE FROM sales WHERE batch_id = ?", id)
+		res = tx.Exec("DELETE FROM sales WHERE batch_id = ?", id)
 		if res.Error != nil {
 			return res.Error
 		}

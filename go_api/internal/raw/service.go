@@ -9,10 +9,12 @@ import (
 	"strings"
 
 	"github.com/huql0605/go_api/internal/summary"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
 var ErrBatchNotFound = errors.New("批次不存在")
+var ErrBatchBusy = errors.New("批次正在删除")
 
 // SummaryRefresher 由 *summary.Service 实现。删除批次后需要重建汇总层。
 type SummaryRefresher interface {
@@ -126,7 +128,12 @@ func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrBatchNotFound
 		}
+		var pgErr *pgconn.PgError
+		if errors.As(pgErr, &pgErr) && pgErr.Code == "55P03" {
+			return nil, ErrBatchBusy
+		}
 		return nil, err
+
 	}
 
 	res := &DeleteImportResult{BatchID: batchID, DeletedSales: deletedSales}
