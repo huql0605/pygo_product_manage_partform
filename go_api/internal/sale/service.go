@@ -15,13 +15,28 @@ type ProductResolver interface {
 	FindIDByNameTx(tx *gorm.DB, name string) (uint, error)
 }
 
+type ManualBatchCreator interface {
+	CreateManualBatchTx(tx *gorm.DB, category string, rowCount int) (uint, error)
+}
+
+type TxRunner interface {
+	Do(func(tx *gorm.DB) error) error
+}
+
 type Service struct {
 	repo     *Repository
 	products ProductResolver
+	batches  ManualBatchCreator
+	tx       TxRunner
 }
 
-func NewService(repo *Repository, prodcuts ProductResolver) *Service {
-	return &Service{repo: repo, products: prodcuts}
+func NewService(repo *Repository, products ProductResolver, batches ManualBatchCreator) *Service {
+	return &Service{repo: repo, products: products, batches: batches}
+}
+
+func (s *Service) WithTx(tx TxRunner) *Service {
+	s.tx = tx
+	return s
 }
 
 type CreateBatchResult struct {
@@ -60,19 +75,34 @@ func (s *Service) buildItems(productID uint, batchID *uint, rows []SaleRow) ([]S
 	return items, nil
 }
 
-func (s *Service) CreateBatch(product string, batchID *uint, rows []SaleRow) (*CreateBatchResult, error) {
-	productID, err := s.products.FindIDByName(product)
-	if err != nil {
-		return nil, fmt.Errorf("品类 %q 不存在 , 请先创建商品", product)
-	}
-	items, err := s.buildItems(productID, batchID, rows)
+func (s *Service) CreateBatch(product string, rows []SaleRow) (*CreateBatchResult, error) {
+	var res *CreateBatchResult
+	err := s.tx.Do(func(tx *gorm.DB) error {
+		productID, err := s.products.FindIDByNameTx(tx, product)
+		if err != nil {
+			return fmt.Errorf("品类 %q 不存在，请先创建商品", product)
+		}
+		batchID, err := s.batches.CreateManualBatchTx(tx, product, len(rows))
+		if err != nil {
+			return err
+		}
+		items, err := s.buildItems(productID, &batchID, rows)
+		if err != nil {
+			return nil
+		}
+		if err := s.repo.CreateManyTx(tx, items); err != nil {
+			return err
+		}
+
+		res = &CreateBatchResult{ProductID: productID, BatchID: &batchID, Inserted: len(items)}
+
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if err := s.repo.CreateMany(items); err != nil {
-		return nil, err
-	}
-	return &CreateBatchResult{ProductID: productID, BatchID: batchID, Inserted: len(items)}, nil
+	return res, nil
+
 }
 
 func (s *Service) ReplaceBatchTx(tx *gorm.DB, product string, batchId uint, rows []SaleRow) (*CreateBatchResult, error) {

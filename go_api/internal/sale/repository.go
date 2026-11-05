@@ -16,6 +16,13 @@ func (r *Repository) CreateMany(rows []Sales) error {
 	})
 }
 
+func (r *Repository) CreateManyTx(tx *gorm.DB, rows []Sales) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return tx.CreateInBatches(rows, 500).Error
+}
+
 func (r *Repository) ReplaceBatchTx(tx *gorm.DB, batchId uint, rows []Sales) error {
 	if err := tx.Where("batch_id = ? ", batchId).Delete(&Sales{}).Error; err != nil {
 		return err

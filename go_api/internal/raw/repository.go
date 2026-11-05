@@ -28,6 +28,19 @@ func (r *Repository) CreateBatch(batch *ImportBatch, records []RawRecord) error 
 
 }
 
+func (r *Repository) CreateManualBatchTx(tx *gorm.DB, category string, rowCount int) (uint, error) {
+	batch := &ImportBatch{
+		Source:   "manual",
+		Category: category,
+		Status:   StatusMapped,
+		RowCount: rowCount,
+	}
+	if err := tx.Create(batch).Error; err != nil {
+		return 0, err
+	}
+	return batch.ID, nil
+}
+
 func (r *Repository) GetBatch(id uint) (*ImportBatch, error) {
 	var b ImportBatch
 	if err := r.db.First(&b, id).Error; err != nil {

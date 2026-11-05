@@ -25,15 +25,15 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	repo := product.NewRepository(db)
 	svc := product.NewService(repo)
 
-	salerepo := sale.NewRepository(db)
-	salesvc := sale.NewService(salerepo, repo)
-
 	// summary 要先于 raw / mapping 创建：删除批次与转换批次都需要在完成后重建汇总层。
 	summaryRepo := summary.NewRepository(db)
 	summarySvc := summary.NewService(summaryRepo)
 
 	rawRepo := raw.NewRepository(db)
 	rawSvc := raw.NewService(rawRepo).WithSummary(summarySvc)
+
+	salerepo := sale.NewRepository(db)
+	salesvc := sale.NewService(salerepo, repo,rawRepo).WithTx(uow.New(db))
 
 	mappingRepo := mapping.NewRepository(db)
 	mappingSvc := mapping.NewService(mappingRepo, rawRepo, salesvc).WithTx(uow.New(db)).WithSummary(summarySvc)
