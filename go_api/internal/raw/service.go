@@ -15,7 +15,7 @@ import (
 )
 
 var ErrBatchNotFound = errors.New("批次不存在")
-var ErrBatchBusy = errors.New("批次正在删除")
+var ErrBatchBusy = errors.New("批次正在被其他操作占用，请稍后重试")
 
 // SummaryRefresher 由 *summary.Service 实现。删除批次后需要重建汇总层。
 type SummaryRefresher interface {
@@ -136,7 +136,7 @@ func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
 			return nil, ErrBatchNotFound
 		}
 		var pgErr *pgconn.PgError
-		if errors.As(pgErr, &pgErr) && pgErr.Code == "55P03" {
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
 			return nil, ErrBatchBusy
 		}
 		return nil, err

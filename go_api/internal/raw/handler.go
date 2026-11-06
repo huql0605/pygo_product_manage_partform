@@ -110,6 +110,10 @@ func (h *Handler) DeleteImport(c *gin.Context) {
 		response.NotFound(c, err.Error())
 		return
 	}
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
 	response.Success(c, res)
 }
 

@@ -83,7 +83,7 @@
 | 32 | P1 | Go 上传接口不校验 rows 与文件内容一致，可提交任意行 | 已修复 | `raw/handler.go`、`raw/service.go` |
 | 33 | P2 | 重复上传仍先解析；`raw_files` 无重放、无清理接口 | 本轮新增 | `importer.py`、`raw/repository.go` |
 | 34 | P2 | Python `ImporterFaildError` 拼写错误且未被捕获，可能返回 500 | 已修复 | `python_code/app/modules/importer/service.py` |
-| 35 | P2 | `PurgeBatch` 加锁但没有锁等待上限 | 本轮新增 | `raw/repository.go` |
+| 35 | P2 | `PurgeBatch` 加锁但没有锁等待上限 | 已修复 | `raw/repository.go`、`raw/service.go`、`raw/handler.go` |
 
 ---
 
@@ -167,6 +167,17 @@ README 已注明 `failed` 仅可能出现在历史数据中，architecture 的�
 
 - Python 客户端正常上传返回 `code=0`，写入 1 个批次。
 - 篡改 rows、缺失 `signature`、错误 key 均返回 `400 / 签名不一致`，数据库中无对应批次。
+
+### 2.9 PurgeBatch 锁等待上限（原 #35）已修复
+
+`PurgeBatch` 在加锁前执行 `SET LOCAL lock_timeout = '5s'`。`55P03` 通过 `errors.As(err, &pgErr)` 映射为 `ErrBatchBusy`，handler 返回 `409 / 10005`。
+
+本次同时修了两个会导致错误处理失效的问题：
+
+- 原代码写成 `errors.As(pgErr, &pgErr)`，把 nil 指针作为 `error` 传入，锁超时后触发 nil pointer panic，最终返回 500。
+- handler 缺少一般错误分支，非 `ErrBatchBusy` / `ErrBatchNotFound` 的错误会被吞掉。现已补 `response.InternalError`。
+
+2026-11-06 实测：外部持有 `import_batches.id=13` 行锁后，`DELETE /api/imports/13` 在 5.004 秒返回 `409 / 10005`，批次未被删除；删除不存在批次返回 `404 / 10002`。
 
 ---
 
@@ -428,18 +439,6 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 
 建议后续补一个“Go 返回业务错误码”的单元测试。
 
-### 5.17 PurgeBatch 加锁但没有锁等待上限（本轮新增 #35）
-
-`raw.Repository.PurgeBatch` 已对批次行加 `FOR UPDATE`，但没有像 transform 那样设置 `lock_timeout`。如果 transform 长时间持有批次锁，删除请求可能一直挂起。
-
-**建议改法**：在 `PurgeBatch` 事务内、加锁前执行：
-
-```sql
-SET LOCAL lock_timeout = '5s';
-```
-
-并把超时错误映射为 409，与 transform 保持一致。
-
 ---
 
 ## 6. 优先级建议
@@ -448,7 +447,7 @@ SET LOCAL lock_timeout = '5s';
 
 1. **先修数据正确性**：手工 `batch_id`（#24）、手工数据删除（#7）。
 2. **再修汇总层**：增量刷新（#8）、对账覆盖（#9）、双口径标识（#11）。
-3. **补生命周期**：原始文件重放与清理（#1、#33）、数据库约束（#17）、`PurgeBatch` 锁上限（#35）。
+3. **补生命周期**：原始文件重放与清理（#1、#33）、数据库约束（#17）。
 4. **最后统一 API 语义**：4xx 映射（#13）、limit（#14）、月份校验（#16）、错误码（#28）。
 5. **持续补测试与 CI**（#21）。
 
