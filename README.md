@@ -249,8 +249,6 @@ curl -X POST http://localhost:8080/api/import-uploads \
 
 > 普通上传建议走 Python 的 `/import/upload`：它会完成 CSV/Excel 解析并自动提交 rows；直接调用 Go 的 `/api/import-uploads` 时，`rows` 必须由调用方保证与文件内容一致。
 
-> 已知限制：当前数据库的 `uk_batch_cat_file` 实际只约束 `raw_file_id`，同一文件跨品类复用会失败。修正 SQL 与测试步骤见 `docs/next-change-plan.md` 的 2.1 节。
-
 ### `POST /api/imports`
 
 写入一批原始数据（JSONB），不校验业务字段。
@@ -355,7 +353,7 @@ curl -X POST http://localhost:8080/api/imports \
   "total": 9, "page": 1, "size": 20 }
 ```
 
-旧批次没有原始文件，`file_hash` 为 64 个空格或空串，`raw_file_id` 为 `null`，`reader_version` 为空。
+旧批次没有原始文件，`file_hash` 为空串，`raw_file_id` 为 `null`，`reader_version` 为空。
 
 ### `DELETE /api/imports/:id`
 

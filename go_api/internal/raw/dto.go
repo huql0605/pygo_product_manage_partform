@@ -48,4 +48,6 @@ type UploadImportInput struct {
 	Content       []byte
 	Rows          []map[string]any
 	ExpectedHash  string
+	Signature     string
+	RowsJSON      string
 }

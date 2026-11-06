@@ -14,6 +14,7 @@ type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Python   PythonConfig   `mapstructure:"python"`
+	Import   ImportConfig   `mapstructure:"import"`
 }
 
 type ServerConfig struct {
@@ -32,6 +33,10 @@ type DatabaseConfig struct {
 type PythonConfig struct {
 	BaseURL string        `mapstructure:"base_url"`
 	Timeout time.Duration `mapstructure:"timeout"`
+}
+
+type ImportConfig struct {
+	SigningKey string `mapstructure:"signing_key"`
 }
 
 func Load(path string) (*Config, error) {
@@ -86,5 +91,8 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("PYTHON_BASE_URL"); v != "" {
 		c.Python.BaseURL = v
+	}
+	if v := os.Getenv("IMPORT_SIGNING_KEY"); v != "" {
+		c.Import.SigningKey = v
 	}
 }

@@ -18,6 +18,8 @@ class Settings(BaseSettings):
         validation_alias="MAX_UPLOAD_BYTES",
     )
 
+    import_signing_key :str=Field(validation_alias="IMPORT_SIGNING_KEY")
+
 
 
 # 全局唯一实例：字段必须通过实例访问，不能直接用 Settings.database_url

@@ -1,6 +1,7 @@
 package raw
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,8 +23,9 @@ type SummaryRefresher interface {
 }
 
 type Service struct {
-	repo    *Repository
-	summary SummaryRefresher
+	repo       *Repository
+	summary    SummaryRefresher
+	signingKey string
 }
 
 func NewService(repo *Repository) *Service {
@@ -32,6 +34,11 @@ func NewService(repo *Repository) *Service {
 
 func (s *Service) WithSummary(r SummaryRefresher) *Service {
 	s.summary = r
+	return s
+}
+
+func (s *Service) WithSigningKey(key string) *Service {
+	s.signingKey = key
 	return s
 }
 
@@ -156,8 +163,17 @@ func (s *Service) CreateBatchFromFile(in UploadImportInput) (*CreateResult, erro
 	}
 	sum := sha256.Sum256(in.Content)
 	hash := hex.EncodeToString(sum[:])
+	rowsSum := sha256.Sum256([]byte(in.RowsJSON))
+	rowsHash := hex.EncodeToString(rowsSum[:])
+
 	if in.ExpectedHash != "" && !strings.EqualFold(in.ExpectedHash, hash) {
 		return nil, fmt.Errorf("文件指纹不一致：客户端 %s，服务端 %s", in.ExpectedHash, hash)
+	}
+	expected := hex.EncodeToString(
+		s.hmacSHA256(s.signingKey, hash+"\n"+in.Category+"\n"+in.ReaderVersion+"\n"+rowsHash),
+	)
+	if !hmac.Equal([]byte(expected), []byte(in.Signature)) {
+		return nil, fmt.Errorf("签名不一致")
 	}
 
 	records, err := s.buildRecords(in.Rows)
@@ -197,4 +213,10 @@ func (s *Service) CreateBatchFromFile(in UploadImportInput) (*CreateResult, erro
 		Duplicated: duplicated,
 		FileHash:   hash,
 	}, nil
+}
+
+func (s *Service) hmacSHA256(key string, data string) []byte {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(data))
+	return mac.Sum(nil)
 }

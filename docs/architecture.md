@@ -184,7 +184,7 @@ SHA-256 在 Python 接入层对**原始字节**计算一次，Go 原始层收到
 | 旧 `POST /api/imports` | 不保存文件、不参与指纹去重 |
 | `reader_version` 变化 | 当前仍返回已有批次；需要重解析时走显式重放接口 |
 
-> 当前数据库中的批次唯一索引仍需修正为 `(category, raw_file_id)`，详见 `docs/design-review.md` 与 `docs/next-change-plan.md`。
+
 
 ### 4.4 原始层不解析列名
 

@@ -147,9 +147,10 @@ func (h *Handler) UploadImport(c *gin.Context) {
 		return
 	}
 
+	rowsJSON := c.PostForm("rows")
 	var rows []map[string]any
-	if err := json.Unmarshal([]byte(c.PostForm("rows")), &rows); err != nil {
-		response.BadRequest(c, errors.CodeInvalidParam, "rows is  invalid json "+err.Error())
+	if err := json.Unmarshal([]byte(rowsJSON), &rows); err != nil {
+		response.BadRequest(c, errors.CodeInvalidParam, "rows is invalid json "+err.Error())
 		return
 	}
 
@@ -184,6 +185,8 @@ func (h *Handler) UploadImport(c *gin.Context) {
 		Content:       data,
 		Rows:          req.Rows,
 		ExpectedHash:  c.PostForm("file_hash"),
+		Signature:     c.PostForm("signature"),
+		RowsJSON:      rowsJSON,
 	})
 
 	if err != nil {

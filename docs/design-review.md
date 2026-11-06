@@ -1,8 +1,8 @@
-# 设计评审：分层数据平台（2026-11-02 复核更新）
+# 设计评审：分层数据平台（2026-11-03 复核更新）
 
-> 基线：`2fcebfe`（2026-11-01，提交信息为“raw 层加入文件指纹识别，重复文件上传不会重复添加数据”）。
-> 上一版评审基于 `4df6303`。本次复核确认原始文件留存与指纹去重已经落地，同时发现去重索引、上传完整性和原始文件生命周期等新问题。
-> 本文保留原编号以便追溯，新增 31–34 号问题；每条结论都对应仓库中的实际代码或数据库结构。
+> 基线：`6e4fa82`（2026-11-03，加入 transform 互斥锁，处理并发情况下 transform 的异常）。
+> 本次复核确认 #23、#25、#31、#34 以及 #5 的状态事务问题已经修复；原始文件留存（#1）仍有缺口，上传完整性（#32）已于 2026-11-06 修复。
+> 本文保留原编号以便追溯，新增 31–35 号问题；每条结论都对应仓库中的实际代码或数据库结构。
 
 ## 0. 本轮复核说明
 
@@ -11,9 +11,9 @@
 **复核方法**：
 
 1. 逐项对照上一版评审与当前代码，确认“声称已改”是否真正落地。
-2. 阅读 `2fcebfe` 的 diff，重点检查 `raw_files`、`/api/import-uploads` 与 Python 接入层。
+2. 阅读 `6e4fa82` 的 diff，重点检查 transform 事务、批次锁与并发行为。
 3. 检查真实 PostgreSQL 的表结构与索引，不只依赖 GORM 模型声明。
-4. 运行现有构建和测试。
+4. 运行现有构建和测试，并做并发 transform 与锁等待验证。
 
 **本轮执行结果**：
 
@@ -23,16 +23,17 @@
 | `cd go_api && go vet ./...` | 通过 |
 | `cd go_api && go test ./...` | 通过；`mapping` 单测通过；`summary` 的 3 个集成测试因未设置 `TEST_DATABASE_URL` 跳过 |
 | `cd python_code && uv run python -m unittest discover -s tests -v` | 8 个用例全部通过 |
-| 数据库结构检查 | `raw_files` 已存在；`import_batches` 已增加文件字段；发现 `uk_batch_cat_file` 实际只约束 `raw_file_id` |
-| 端到端上传验证 | 上一轮已实测：phone_sales.csv 上传、transform、dws_sales 对账通过；本轮未重复执行 |
+| 数据库结构检查 | `uk_batch_cat_file` 已修正为 `UNIQUE (category, raw_file_id)` |
+| 并发 transform 验证 | 4 个并发请求后 `sales` 行数保持 168，状态为 `mapped`，汇总对账通过 |
+| 锁等待验证 | 手动持有批次行锁后，transform 5 秒超时返回 `409 / 10005` |
 
 **总体结论**：
 
 - 原 #1 已基本修复：原始字节存入 `raw_files.content`，SHA-256 全局唯一，重复上传返回已有批次。
-- 但原 #1 仍有缺口：没有重放接口、没有清理机制，且 Go 上传接口不校验 rows 是否真的来自文件。
-- 新发现一个会直接破坏去重语义的问题：批次唯一索引建成了 `UNIQUE(raw_file_id)`，不是设计的 `UNIQUE(category, raw_file_id)`。
-- 汇总层全量重建、对账不完整、手工数据不可删除、销量解析不安全等旧问题仍未处理。
-- README 与 architecture 已在本次更新中同步到当前实现，文档漂移（原 #29）关闭。
+- 原 #1 仍有缺口：没有重放接口、没有清理机制，且 Go 上传接口不校验 rows 是否真的来自文件。
+- #23 销量整数解析、#25 并发 transform、#31 批次唯一索引、#34 Python 异常类拼写、#5 状态事务均已修复。
+- 汇总层全量重建、对账不完整、手工数据不可删除、上传 rows 完整性等旧问题仍未处理。
+- README 与 architecture 已在上一轮同步；本轮又修正了批次索引与旧 `file_hash` 的说明。
 
 等级定义：
 
@@ -52,7 +53,7 @@
 | 2 | P0 | 金额用 `float64` / `float8` 存储 | 已修复 | `sale/model.go`、`summary/model.go` |
 | 3 | P0 | `avg_price` 只有按记录数加权口径 | 已修复 | `python_code/app/modules/analytics/service.py` |
 | 4 | P0 | `product_count` 用 `COUNT(DISTINCT name)` | 已修复 | `python_code/app/modules/analytics/service.py` |
-| 5 | P0 | 转换失败后 `failed` 状态与上一轮数据矛盾 | 部分修复 | `go_api/internal/mapping/service.go` |
+| 5 | P0 | 转换失败后 `failed` 状态与上一轮数据矛盾 | 已修复 | `go_api/internal/mapping/service.go` |
 | 6 | P0 | `attrs` 只装未映射列 | 已修复 | `go_api/internal/mapping/service.go` |
 | 7 | P0 | 手工写入（`batch_id` 为空）无删除路径 | 仍存在 | `sale/service.go`、`raw/repository.go` |
 | 8 | P1 | 汇总层全量 `TRUNCATE` 重建同步跑在请求里 | 仍存在 | `summary/repository.go` |
@@ -65,23 +66,24 @@
 | 15 | P2 | `attributes` 的 `productor` 被静默丢弃 | 仍存在 | `python_code/app/api/analytics.py` |
 | 16 | P2 | `start_month` / `end_month` 无格式校验 | 仍存在 | `analytics/handler.go` |
 | 17 | P2 | 数据库层缺外键、`CHECK`、状态枚举 | 仍存在 | `sale/model.go`、`raw/model.go` |
-| 18 | P2 | `PurgeBatch` 直接删 `sales`；`uow` 未使用 | 仍存在 | `raw/repository.go`、`common/uow` |
+| 18 | P2 | `PurgeBatch` 直接删 `sales`，跨层职责未收敛 | 仍存在 | `raw/repository.go` |
 | 19 | P2 | 没有真正的 ADS 物化层 | 仍存在 | 整体架构 |
 | 20 | P2 | Python + Pandas 主要承担纯 SQL 代理 | 仍存在 | 整体架构 |
 | 21 | P2 | 测试偏纯函数，handler / 事务 / 并发无覆盖 | 部分修复 | `go_api/internal/*`、`python_code/tests` |
 | 22 | P2 | 注释与实现不符（样例值、行数口径、路由注释） | 部分修复 | `raw/repository.go`、`router.go` |
-| 23 | P1 | `transform` 用 `ParseFloat` 和 `int64` 解析销量，静默截断、接受负数或 NaN | 仍存在 | `mapping/transform.go` |
+| 23 | P1 | `transform` 用 `ParseFloat` 和 `int64` 解析销量，静默截断、接受负数或 NaN | 已修复 | `mapping/transform.go` |
 | 24 | P1 | `POST /api/sales/batch` 的 `batch_id` 未校验归属 | 仍存在 | `sale/service.go` |
-| 25 | P1 | 同一批次并发 `transform` 可产生重复明细 | 仍存在 | `mapping/service.go`、`sale/repository.go` |
+| 25 | P1 | 同一批次并发 `transform` 可产生重复明细 | 已修复 | `mapping/service.go`、`raw/repository.go` |
 | 26 | P2 | `attrs` 的 key 是原始列名，中文 key 无法查询 | 仍存在 | `mapping/service.go`、Python service |
 | 27 | P2 | Python 上传阻塞事件循环、先解析后去重、客户端错误语义不清 | 部分修复 | `python_code/app/api/importer.py` |
 | 28 | P2 | 错误码映射不一致：转换失败一律 400，手工写入失败一律 500 | 仍存在 | `mapping/handler.go`、`sale/handler.go` |
 | 29 | P2 | README / architecture 与实现漂移 | 已修复 | `README.md`、`docs/architecture.md` |
 | 30 | P2 | `POST /api/imports` 不校验品类存在 | 仍存在 | `raw/service.go` |
-| 31 | P1 | 批次唯一索引实际为 `UNIQUE(raw_file_id)`，同文件跨品类复用失败 | 本轮新增 | `raw/model.go`、数据库 `uk_batch_cat_file` |
-| 32 | P1 | Go 上传接口不校验 rows 与文件内容一致，可提交任意行 | 本轮新增 | `raw/handler.go`、`raw/service.go` |
+| 31 | P1 | 批次唯一索引实际为 `UNIQUE(raw_file_id)`，同文件跨品类复用失败 | 已修复 | `raw/model.go`、数据库 `uk_batch_cat_file` |
+| 32 | P1 | Go 上传接口不校验 rows 与文件内容一致，可提交任意行 | 已修复 | `raw/handler.go`、`raw/service.go` |
 | 33 | P2 | 重复上传仍先解析；`raw_files` 无重放、无清理接口 | 本轮新增 | `importer.py`、`raw/repository.go` |
-| 34 | P2 | Python `ImporterFaildError` 拼写错误且未被捕获，可能返回 500 | 本轮新增 | `python_code/app/modules/importer/service.py` |
+| 34 | P2 | Python `ImporterFaildError` 拼写错误且未被捕获，可能返回 500 | 已修复 | `python_code/app/modules/importer/service.py` |
+| 35 | P2 | `PurgeBatch` 加锁但没有锁等待上限 | 本轮新增 | `raw/repository.go` |
 
 ---
 
@@ -103,7 +105,6 @@
 
 - 没有从 `raw_files.content` 重放批次的接口。
 - 删除批次不会删除 `raw_files`，也没有清理无引用文件的机制。
-- Go 侧没有校验 `rows` 是否真的由该文件解析而来，见 #32。
 
 **涉及文件**：`go_api/internal/raw/`、`python_code/app/api/importer.py`、`python_code/app/modules/importer/service.py`
 
@@ -132,15 +133,15 @@ SUM(total_amount) / SUM(total_sales) AS avg_selling_price
 
 `get_sales_summary` 使用 `COUNT(DISTINCT (productor, name))`，跨品牌同名机型不再合并。
 
-### 2.5 失败状态与数据矛盾（原 #5）部分修复
+### 2.5 失败状态与数据矛盾（原 #5）已修复
 
-`mapping.Service.Transform` 不再在失败时写 `status=failed`。失败发生在写库之前，上一轮 `sales` 保持不变。
+`mapping.Service.Transform` 已把批次加锁、原始行读取、明细替换和状态更新放进同一个事务：
 
-**残留**：
+- 任意一步失败都会整体回滚，不会出现“明细已替换、状态还是旧值”。
+- 转换失败发生在写库之前，上一轮 `sales` 保持不变。
+- 不再写 `status=failed`；`raw.StatusFailed` 只用于兼容旧数据。
 
-- `UpdateStatus` 在 `ReplaceBatch` 提交后单独执行，状态更新失败时明细已替换。
-- `raw.StatusFailed` 是死常量；旧数据中仍可能有 `failed`。README 已注明 `failed` 仅历史数据。
-- architecture 的状态图已移除 `loaded -> failed`。
+README 已注明 `failed` 仅可能出现在历史数据中，architecture 的状态图已移除 `loaded -> failed`。
 
 ### 2.6 `attrs` 内容（原 #6）已修复
 
@@ -153,6 +154,19 @@ SUM(total_amount) / SUM(total_sales) AS avg_selling_price
 - README：新增 `/api/import-uploads`，补充文件指纹、去重、`duplicated`、`file_hash`、`avg_listed_price` / `avg_selling_price`，修正 `failed` 状态与 transform 自动刷新说明。
 - architecture：新增 `raw_files`，更新 ODS 定义、上传链路、事务边界、接口清单、数据库表、批次状态图，并修正 grain 与 ADS 表述。
 - 原 #10 的“grain 支撑全部报表”已改为“支撑四类结构化报表，属性报表走明细探索口径”。
+
+### 2.8 上传 rows 完整性（原 #32）已修复
+
+`/api/import-uploads` 现在要求内部 HMAC 签名：
+
+- Python 对 `file_hash + "\n" + category + "\n" + reader_version + "\n" + sha256(rows_json)` 计算 HMAC-SHA256，`rows_json` 使用固定 separators 和 `sort_keys`。
+- Go 对收到的 rows 表单原文计算摘要，签名校验通过后才写 `raw_files` / `import_batches` / `raw_records`。
+- 两边共用 `IMPORT_SIGNING_KEY`，任一进程缺少该变量时启动失败。
+
+2026-11-06 实测：
+
+- Python 客户端正常上传返回 `code=0`，写入 1 个批次。
+- 篡改 rows、缺失 `signature`、错误 key 均返回 `400 / 签名不一致`，数据库中无对应批次。
 
 ---
 
@@ -214,26 +228,21 @@ DELETE FROM sales WHERE batch_id = ?
 
 **建议改法**：按 `row_index` 游标分页流式处理，边解析边分批写入。
 
-### 4.5 销量解析会静默截断、接受负数与 NaN（原 #23）仍存在
+### 4.5 销量解析会静默截断、接受负数与 NaN（原 #23）已修复
 
-`mapping/transform.go`：
+`mapping/transform.go` 已改为：
 
 ```go
-salesNum, err := strconv.ParseFloat(values["sales"], 64)
-...
-Sales: int64(salesNum),
+salesNum, err := strconv.ParseInt(values["sales"], 10, 64)
+if err != nil {
+    return nil, fmt.Errorf("第 %d 行 sales 不是数字: %q", lineNo, values["sales"])
+}
+if salesNum < 0 {
+    return nil, fmt.Errorf("第 %d 行 sales 不能为负: %d", lineNo, salesNum)
+}
 ```
 
-| 输入 | 结果 |
-|---|---|
-| `"12.9"` | `12`，静默截断 |
-| `"-5"` | `-5`，负销量进入明细和汇总 |
-| `"NaN"` / `"Inf"` | `ParseFloat` 成功，转 `int64` 结果依赖实现 |
-| 超大整数 | 超过 `2^53` 后精度丢失 |
-
-HTTP 的 `POST /api/sales/batch` 有 `gte=0`，但 transform 走自己的 `buildRow`，没有整数和非负校验。
-
-**建议改法**：改用 `strconv.ParseInt`，显式校验 `>= 0`，补边界测试。
+小数、负数、`NaN`、`Inf` 和超出 `int64` 的值都会被拒绝；测试已同步为“小数报错”。
 
 ### 4.6 手工写入的 `batch_id` 未校验归属（原 #24）仍存在
 
@@ -244,79 +253,37 @@ HTTP 的 `POST /api/sales/batch` 有 `gte=0`，但 transform 走自己的 `build
 
 **建议改法**：手工接口不接受客户端 `batch_id`，由服务端创建 `manual` 批次；或先校验批次和品类。
 
-### 4.7 同一批次并发 transform 可产生重复明细（原 #25）仍存在
+### 4.7 同一批次并发 transform 可产生重复明细（原 #25）已修复
 
-`ReplaceBatch` 是事务内先 `DELETE` 再 `INSERT`，`sales` 没有 `(batch_id, row_index)` 唯一约束。两个并发请求可能都完成 DELETE，然后各自 INSERT，导致明细翻倍。
-
-**建议改法**：transform 事务内对 `import_batches` 行加 `SELECT ... FOR UPDATE`；或使用按 batch_id 的 advisory lock；或增加 `row_index` 唯一约束配合 upsert。
-
-### 4.8 批次唯一索引建错列组合（本轮新增 #31）
-
-模型声明：
-
-```go
-Category  string `json:"category" gorm:"not null;index"`
-RawFileID *uint  `json:"raw_file_id" gorm:"uniqueIndex:uk_batch_cat_file,priority:2"`
-```
-
-`Category` 没有加入 `uk_batch_cat_file`，所以实际数据库索引是：
-
-```text
-uk_batch_cat_file UNIQUE btree (raw_file_id)
-```
-
-而不是设计的：
-
-```text
-UNIQUE (category, raw_file_id)
-```
-
-**影响**：
-
-- 同一份文件用于不同品类时，需要复用 `raw_files` 并新建批次，但 `raw_file_id` 单列唯一会直接冲突。
-- `CreateBatchWithFile` 在冲突后按 `(category, raw_file_id)` 查不到已有批次，返回记录不存在的错误。
-- 去重语义从“品类内文件唯一”变成了“全局文件唯一”，与设计不符。
-
-**建议改法**：
+`mapping.Service.Transform` 现在在事务内先执行：
 
 ```sql
-DROP INDEX uk_batch_cat_file;
-CREATE UNIQUE INDEX uk_batch_cat_file
-    ON import_batches(category, raw_file_id);
+SET LOCAL lock_timeout = '5s';
+SELECT * FROM import_batches WHERE id = ? FOR UPDATE;
 ```
 
-同时把模型改为：
+然后读取原始行、替换明细、更新状态并提交。同一批次的两个 transform 会串行执行，第二个请求在第一个提交后才能继续。
+
+实测 4 个并发 transform 后，`sales` 行数保持 168，没有翻倍；锁等待超过 5 秒返回 `409 / 10005`。
+
+### 4.8 批次唯一索引建错列组合（原 #31）已修复
+
+模型已改为：
 
 ```go
 Category  string `json:"category" gorm:"not null;index;uniqueIndex:uk_batch_cat_file,priority:1"`
 RawFileID *uint  `json:"raw_file_id" gorm:"uniqueIndex:uk_batch_cat_file,priority:2"`
 ```
 
-补一条集成测试：同一文件分别以 `phone` 和 `computer` 上传，必须得到两个批次、一条 `raw_files`。
+数据库索引已从 `UNIQUE (raw_file_id)` 修正为：
 
-附带数据清理：旧批次的 `file_hash` 是 `char(64)` 填充的空格。建议执行：
-
-```sql
-UPDATE import_batches SET file_hash = '' WHERE btrim(file_hash) = '';
+```text
+uk_batch_cat_file UNIQUE btree (category, raw_file_id)
 ```
 
-### 4.9 上传接口不校验 rows 与文件一致（本轮新增 #32）
+旧批次的 `file_hash` 目前为空串，不再有 64 个空格的展示问题。
 
-`POST /api/import-uploads` 同时接收 `file` 和 `rows`。Go 只校验文件 SHA-256 和 rows 的结构，不校验 rows 是否由该文件解析而来。
-
-**影响**：
-
-- 调用方可以提交真实文件字节，但附带任意 rows；批次会被标记为该文件的解析结果。
-- 由于去重按文件指纹生效，后续同一文件上传会直接返回这条被污染的批次，无法通过正常重传修正。
-- 这不是身份认证问题，而是数据完整性边界问题。
-
-**建议改法**（按强度从低到高）：
-
-1. 将该接口限制为内部网络，并在网关层禁止外部直接访问。
-2. Python 与 Go 共享内部签名密钥，对 `file_hash + rows_digest + category + reader_version` 做 HMAC。
-3. Go 侧重新解析文件并与 rows 比对；这会引入 Go 解析器，改变当前分工。
-
-短期建议至少实现第 1 或第 2 种，并在 README 中明确 `/api/import-uploads` 是内部接口。
+仍需补一条集成测试：同一文件分别以 `phone` 和 `computer` 上传，必须得到两个批次、一条 `raw_files`。
 
 ---
 
@@ -358,11 +325,13 @@ Go 的 `filterFrom` 会透传 `productor`，但 Python `/attributes` 没有该�
 
 **建议改法**：补外键和 CHECK；status 用 CHECK 或 PostgreSQL 枚举；handler 校验 status 白名单。
 
-### 5.6 PurgeBatch 跨层删除，uow 未被使用（原 #18）
+### 5.6 PurgeBatch 跨层删除（原 #18）仍存在
 
-`raw.Repository.PurgeBatch` 直接执行 `DELETE FROM sales`，与“repository 独占数据访问”的架构声明冲突。`common/uow` 包没有任何引用。
+`raw.Repository.PurgeBatch` 直接执行 `DELETE FROM sales`，与“repository 独占数据访问”的架构声明冲突。
 
-**建议改法**：加 `ON DELETE CASCADE` 外键，让删除由数据库保证；或真正引入 Unit of Work；删除未使用的 `uow` 包。
+`common/uow` 现在已被 `mapping` 使用，不再是从未引用的死代码；但 `PurgeBatch` 仍没有走 Unit of Work。
+
+**建议改法**：加 `ON DELETE CASCADE` 外键，让删除由数据库保证；或把跨 repository 事务提升到 service 层。
 
 ### 5.7 没有真正的 ADS 层（原 #19）
 
@@ -453,18 +422,23 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 
 **建议改法**：增加重放接口、受控下载接口和按保留期清理无引用文件的任务。
 
-### 5.16 Python 异常类型拼写错误（本轮新增 #34）
+### 5.16 Python 异常类型拼写错误（原 #34）已修复
 
-`python_code/app/modules/importer/service.py` 定义了：
+`python_code/app/modules/importer/service.py` 已删除 `ImporterFaildError`，统一使用 `ImporterFailedError`。API 层继续捕获该异常并返回 502，不会再因为未捕获的异常变成 500。
 
-```python
-class ImporterFaildError(Exception):
-    ...
+建议后续补一个“Go 返回业务错误码”的单元测试。
+
+### 5.17 PurgeBatch 加锁但没有锁等待上限（本轮新增 #35）
+
+`raw.Repository.PurgeBatch` 已对批次行加 `FOR UPDATE`，但没有像 transform 那样设置 `lock_timeout`。如果 transform 长时间持有批次锁，删除请求可能一直挂起。
+
+**建议改法**：在 `PurgeBatch` 事务内、加锁前执行：
+
+```sql
+SET LOCAL lock_timeout = '5s';
 ```
 
-但 `import_file` 在 Go 返回 `code != 0` 时抛出的是 `ImporterFaildError`，API 层没有捕获它，最终会变成 500。正确名称应为 `ImporterFailedError`，并统一由 API 层捕获。
-
-**建议改法**：删除拼写错误的类，统一使用 `ImporterFailedError`；补一个“Go 返回业务错误码”的单元测试。
+并把超时错误映射为 409，与 transform 保持一致。
 
 ---
 
@@ -472,9 +446,9 @@ class ImporterFaildError(Exception):
 
 更细的实施步骤见 `docs/next-change-plan.md`。总体顺序：
 
-1. **先修数据正确性**：批次索引（#31）、销量解析（#23）、手工 `batch_id`（#24）、并发 transform（#25）。
+1. **先修数据正确性**：手工 `batch_id`（#24）、手工数据删除（#7）。
 2. **再修汇总层**：增量刷新（#8）、对账覆盖（#9）、双口径标识（#11）。
-3. **补生命周期**：手工数据删除（#7）、原始文件重放与清理（#1、#33）、数据库约束（#17）。
+3. **补生命周期**：原始文件重放与清理（#1、#33）、数据库约束（#17）、`PurgeBatch` 锁上限（#35）。
 4. **最后统一 API 语义**：4xx 映射（#13）、limit（#14）、月份校验（#16）、错误码（#28）。
 5. **持续补测试与 CI**（#21）。
 
@@ -482,8 +456,8 @@ class ImporterFaildError(Exception):
 
 ## 7. 需要确认的问题
 
-1. `/api/import-uploads` 是否只允许内部网络访问？答案决定 #32 是加网络限制还是加 HMAC 校验。
-2. 同一文件用于不同品类是否必须支持？当前设计答案是“支持”，因此 #31 必须修。
+1. `/api/import-uploads` 已采用内部 HMAC；是否还需要在网关层限制为只允许内网访问？
+2. 同一文件用于不同品类是否必须支持？当前设计答案是“支持”，#31 已在索引层修复，仍需补集成测试。
 3. 手工写入（`POST /api/sales/batch`）是否仍需保留？若只是调试入口，可以直接下线，#7、#24 随之消失。
 4. `top-products` 的 `avg_price` 是否改成成交均价？还是新增 `avg_selling_price`？
 5. 是否会部署多实例？决定汇总刷新和 transform 串行化是否需要分布式锁。
@@ -491,4 +465,4 @@ class ImporterFaildError(Exception):
 
 ---
 
-*本文档随代码演进更新；最近复核：2026-11-02，基线 `2fcebfe`。*
+*本文档随代码演进更新；最近复核：2026-11-06，基线 `6e4fa82` 加 #32 验收。*

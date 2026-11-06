@@ -17,6 +17,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
+	if cfg.Import.SigningKey == "" {
+		log.Fatal("IMPORT_SIGNING_KEY 未配置")
+	}
 	db, err := database.NewPostgres(cfg.Database.DSN())
 	if err != nil {
 		log.Fatalf("db connect failed: %v", err)

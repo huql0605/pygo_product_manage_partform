@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from app.config import settings
 import hashlib
 import json
-
+import hmac
 
 class ImporterInvalidError(Exception):
     """ 上传内容或参数不合法，对应 HTTP 400"""
@@ -18,6 +18,7 @@ class ImportResult:
     row_count:int
     duplicated: bool = False
     file_hash: str = ""
+    signature :str =""
 
 class ImporterService:
     def __init__(self,base_url:str|None = None , timeout:int = 60) -> None:
@@ -56,15 +57,24 @@ class ImporterService:
 
     def import_file(self,*,source:str,category:str,filename:str,content_type:str,content:bytes,rows:list[dict],reader_version:str,) -> ImportResult:
         file_hash=hashlib.sha256(content).hexdigest()
+        rows_json = json.dumps(rows, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        rows_hash = hashlib.sha256(rows_json.encode()).hexdigest()
         files ={
             "file" : (filename,content,content_type or "application/octet-stream"),
         }
+        msg = "\n".join([file_hash, category, reader_version, rows_hash])
+        signature = hmac.new(
+            settings.import_signing_key.encode(),
+            msg.encode(),
+            hashlib.sha256,
+        ).hexdigest()
         data ={
             "source":source,
             "category":category,
             "file_hash":file_hash,
             "reader_version":reader_version,
-            "rows":json.dumps(rows,ensure_ascii=False),
+            "rows":rows_json,
+            "signature":signature,
         }
 
         try:
@@ -94,4 +104,5 @@ class ImporterService:
             row_count=payload.get("row_count",0),
             duplicated=bool(payload.get("duplicated",False)),
             file_hash=payload.get("file_hash",""),
+            signature=signature
         )       
