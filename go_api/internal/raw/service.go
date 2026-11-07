@@ -17,9 +17,9 @@ import (
 var ErrBatchNotFound = errors.New("批次不存在")
 var ErrBatchBusy = errors.New("批次正在被其他操作占用，请稍后重试")
 
-// SummaryRefresher 由 *summary.Service 实现。删除批次后需要重建汇总层。
+// SummaryRefresher 由 *summary.Service 实现。删除批次后按删除前的 grain 重算。
 type SummaryRefresher interface {
-	Refresh() (*summary.RefreshResult, error)
+	RefreshGrains(grains []summary.Grain) (*summary.RefreshResult, error)
 }
 
 type Service struct {
@@ -130,7 +130,7 @@ func (s *Service) ListBatches(category, status string, page, size int) (*ListImp
 // DeleteBatch 删除批次及其明细行与原始数据，随后重建汇总层。
 // 删除不可撤销；重跑导入需要重新上传。
 func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
-	deletedSales, err := s.repo.PurgeBatch(batchID)
+	deletedSales, grains, err := s.repo.PurgeBatch(batchID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrBatchNotFound
@@ -145,7 +145,7 @@ func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
 
 	res := &DeleteImportResult{BatchID: batchID, DeletedSales: deletedSales}
 	if s.summary != nil {
-		if _, err := s.summary.Refresh(); err != nil {
+		if _, err := s.summary.RefreshGrains(grains); err != nil {
 			res.SummaryError = err.Error()
 		} else {
 			res.SummaryRefreshed = true

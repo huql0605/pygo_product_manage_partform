@@ -3,6 +3,7 @@ package raw
 import (
 	"errors"
 
+	"github.com/huql0605/go_api/internal/summary"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -106,10 +107,11 @@ func (r *Repository) ListBatches(category, status string, offset, limit int) ([]
 // PurgeBatch 在一个事务里删除批次及其全部衍生数据：
 // sales 明细行（batch_id 指向它）、raw_records、import_batches。
 //
-// 这里直接写 sales 表名，是因为跨层删除必须落在同一个事务里；
-// 若拆成两个 repository 调用，中途失败会留下"明细已删、原始数据还在"的脏状态。
-func (r *Repository) PurgeBatch(id uint) (int64, error) {
+// 删除前先记录该批次覆盖的 grain，供 summary 在事务提交后重算；
+// 删除后再查 sales 已经查不到这些 grain。
+func (r *Repository) PurgeBatch(id uint) (int64, []summary.Grain, error) {
 	var deletedSales int64
+	var grains []summary.Grain
 
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var batch ImportBatch
@@ -118,6 +120,14 @@ func (r *Repository) PurgeBatch(id uint) (int64, error) {
 			return res.Error
 		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&batch, id).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Raw(`
+			SELECT DISTINCT product_id, productor, name, month
+			FROM sales
+			WHERE batch_id = ?
+		`, id).Scan(&grains).Error; err != nil {
 			return err
 		}
 
@@ -132,7 +142,7 @@ func (r *Repository) PurgeBatch(id uint) (int64, error) {
 		}
 		return tx.Delete(&ImportBatch{}, id).Error
 	})
-	return deletedSales, err
+	return deletedSales, grains, err
 }
 
 func (r *Repository) CreateBatchWithFile(batch *ImportBatch, file *RawFile, records []RawRecord) (bool, error) {

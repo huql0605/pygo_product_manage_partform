@@ -56,7 +56,7 @@
 | 5 | P0 | 转换失败后 `failed` 状态与上一轮数据矛盾 | 已修复 | `go_api/internal/mapping/service.go` |
 | 6 | P0 | `attrs` 只装未映射列 | 已修复 | `go_api/internal/mapping/service.go` |
 | 7 | P0 | 手工写入（`batch_id` 为空）无删除路径 | 仍存在 | `sale/service.go`、`raw/repository.go` |
-| 8 | P1 | 汇总层全量 `TRUNCATE` 重建同步跑在请求里 | 仍存在 | `summary/repository.go` |
+| 8 | P1 | 汇总层全量 `TRUNCATE` 重建同步跑在请求里 | 部分修复 | `summary/repository.go` |
 | 9 | P1 | 对账只比 `total_sales`，无分页与上限 | 仍存在 | `summary/repository.go` |
 | 10 | P1 | 文档称 grain 能支撑全部报表 | 已修正文档 | `docs/architecture.md` |
 | 11 | P1 | 明细口径与汇总口径并存，响应不区分来源 | 仍存在 | `analytics/handler.go`、Python service |
@@ -204,18 +204,27 @@ DELETE FROM sales WHERE batch_id = ?
 
 ## 4. P1：仍存在的规模与正确性问题
 
-### 4.1 汇总层全量重建跑在请求里（原 #8）仍存在
+### 4.1 汇总层增量刷新已实现，但仍同步在请求内（原 #8）部分修复
 
-`summary.Repository.RefreshAll` 仍是单事务 `TRUNCATE + INSERT ... GROUP BY`，由 transform 和 delete 同步触发。
+`summary.Repository` 已增加 `RefreshGrains`，只重算指定 grain：
+
+- transform 在批次锁内、替换明细前后各收集一次 grain，取并集刷新。
+- delete 在 `PurgeBatch` 删除 `sales` 前收集 grain，删除后按这些 grain 重算。
+- 明细已不存在的 grain 会删除对应汇总行。
+- 刷新使用 `pg_advisory_xact_lock` 串行化。
+- `RefreshAll` 保留为手工兜底，已从 `TRUNCATE` 改为 `DELETE`。
+
+仍存在的问题：
 
 | 问题 | 说明 |
 |---|---|
-| O(N²) | 导入 N 个批次等于重建 N 次全表 |
-| 读阻塞 | `TRUNCATE` 持 `ACCESS EXCLUSIVE` 锁到事务提交 |
-| 请求超时 | 刷新耗时随累计数据量线性增长 |
-| 缺索引 | `sales` 没有 `(product_id, productor, name, month)` 复合索引 |
+| 同步刷新 | `Transform` 和 `DeleteBatch` 仍在请求内等待汇总完成 |
+| 请求耗时 | 大 grain 刷新仍会拉长 transform / delete 响应时间 |
+| 无自动化测试 | 增量刷新、删除重算、grain 变化均未进入测试套件 |
 
-**建议改法**：增量重算受影响 grain，用 `INSERT ... ON CONFLICT DO UPDATE`；刷新移出请求链路；补复合索引。
+2026-11-07 实测：同一 grain 由两个批次贡献时汇总正确；删除一个批次后按剩余明细重算；删除最后一个批次后汇总行消失；修改批次月份后旧 grain 被清除、新 grain 生成；`verify` 返回 `ok=true`。
+
+**剩余建议**：把刷新放入任务表或后台 worker，请求只负责写明细并投递刷新任务；补增量刷新的集成测试。
 
 ### 4.2 对账接口不完整（原 #9）仍存在
 
@@ -464,4 +473,4 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 
 ---
 
-*本文档随代码演进更新；最近复核：2026-11-06，基线 `6e4fa82` 加 #32 验收。*
+*本文档随代码演进更新；最近复核：2026-11-07，基线 `6e4fa82` 加 #8、#32、#35 验收。*

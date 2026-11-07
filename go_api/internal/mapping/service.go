@@ -33,7 +33,8 @@ type RuleStore interface {
 }
 
 type SummaryRefresher interface {
-	Refresh() (*summary.RefreshResult, error)
+	GrainsByBatchTx(tx *gorm.DB, batchID uint) ([]summary.Grain, error)
+	RefreshGrains(grains []summary.Grain) (*summary.RefreshResult, error)
 }
 
 type Service struct {
@@ -88,6 +89,8 @@ type TransformResult struct {
 	IgnoredColumns   []string `json:"ignored_columns"` // ExtraColumns 未映射到标准字段的列，但值已写入 sales.attrs，数据未丢弃。
 	SummaryRefreshed bool     `json:"summary_refreshed"`
 	SummaryError     string   `json:"summary_error,omitempty"`
+
+	grains []summary.Grain
 }
 
 // Transform 把某批次的原始数据翻译成标准层（sales）数据。
@@ -109,7 +112,7 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 	}
 
 	if s.summary != nil {
-		if _, err := s.summary.Refresh(); err != nil {
+		if _, err := s.summary.RefreshGrains(res.grains); err != nil {
 			res.SummaryError = err.Error()
 		} else {
 			res.SummaryRefreshed = true
@@ -145,11 +148,28 @@ func (s *Service) transformTx(tx *gorm.DB, batchID uint) (*TransformResult, erro
 		return nil, err
 	}
 
+	var oldGrains []summary.Grain
+	if s.summary != nil {
+		oldGrains, err = s.summary.GrainsByBatchTx(tx, batchID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	replaceRes, err := s.sales.ReplaceBatchTx(
 		tx, batch.Category, batchID, rows,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	var grains []summary.Grain
+	if s.summary != nil {
+		newGrains, err := s.summary.GrainsByBatchTx(tx, batchID)
+		if err != nil {
+			return nil, err
+		}
+		grains = mergeGrains(oldGrains, newGrains)
 	}
 
 	if err := s.raws.UpdateStatusTx(
@@ -163,7 +183,23 @@ func (s *Service) transformTx(tx *gorm.DB, batchID uint) (*TransformResult, erro
 		Product:        batch.Category,
 		Inserted:       replaceRes.Inserted,
 		IgnoredColumns: sortedKeys(ignoredSet),
+		grains:         grains,
 	}, nil
+}
+
+func mergeGrains(a, b []summary.Grain) []summary.Grain {
+	seen := make(map[summary.Grain]struct{}, len(a)+len(b))
+	out := make([]summary.Grain, 0, len(a)+len(b))
+	for _, group := range [][]summary.Grain{a, b} {
+		for _, g := range group {
+			if _, ok := seen[g]; ok {
+				continue
+			}
+			seen[g] = struct{}{}
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 func buildSalesRows(records []raw.RawRecord, rules map[string]string) ([]sale.SaleRow, map[string]struct{}, error) {
