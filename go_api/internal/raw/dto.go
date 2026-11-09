@@ -30,11 +30,12 @@ type ListImportsResult struct {
 }
 
 // DeleteImportResult 删除批次的结果。删除会同时清掉该批次的明细行，
-// 并重建汇总层，因此需要把这两步的结果回报给调用方。
+// 并把汇总刷新任务写入 outbox，由后台 worker 异步重算。
 type DeleteImportResult struct {
 	BatchID          uint   `json:"batch_id"`
 	DeletedSales     int64  `json:"deleted_sales"`
 	SummaryRefreshed bool   `json:"summary_refreshed"`
+	SummaryPending   bool   `json:"summary_pending"`
 	SummaryError     string `json:"summary_error,omitempty"`
 }
 

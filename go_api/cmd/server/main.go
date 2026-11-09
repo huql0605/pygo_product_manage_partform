@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/huql0605/go_api/internal/config"
 	"github.com/huql0605/go_api/internal/database"
 	"github.com/huql0605/go_api/internal/router"
+	"github.com/huql0605/go_api/internal/summary"
 	"github.com/joho/godotenv"
 )
 
@@ -26,6 +29,10 @@ func main() {
 	}
 
 	router.MustMigrate(db)
+
+	worker := summary.NewWorker(summary.NewRepository(db), time.Second)
+	go worker.Run(context.Background())
+
 	r := router.New(db, cfg)
 	addr := ":" + strconv.Itoa(cfg.Server.Port)
 	log.Printf("go api listen on %s", addr)

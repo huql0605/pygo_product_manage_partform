@@ -37,6 +37,11 @@ func (s *Service) GrainsByBatchTx(tx *gorm.DB, batchID uint) ([]Grain, error) {
 	return s.repo.GrainsByBatchTx(tx, batchID)
 }
 
+// EnqueueRefreshTx 在调用方事务内写入汇总刷新任务。
+func (s *Service) EnqueueRefreshTx(tx *gorm.DB, grains []Grain) error {
+	return EnqueueRefreshTx(tx, grains)
+}
+
 func (s *Service) RefreshAll() (*RefreshResult, error) {
 	n, err := s.repo.RefreshAll()
 	if err != nil {

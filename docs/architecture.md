@@ -101,9 +101,9 @@ flowchart TD
 
     SALES[("sales<br/>product_id, batch_id<br/>productor, name, price<br/>sales, month, attrs")]
 
-    subgraph L6["⑥ 汇总层 · DWS（当前全量重建）"]
-        W1["POST /api/summary/refresh<br/>或 transform 成功后自动触发"]
-        W2["事务：TRUNCATE + INSERT SELECT<br/>GROUP BY (product_id, productor, name, month)"]
+    subgraph L6["⑥ 汇总层 · DWS（增量刷新）"]
+        W1["transform / delete 在同一事务写入<br/>summary_refresh_tasks"]
+        W2["后台 worker 按 grain 增量重算<br/>DELETE + INSERT SELECT"]
         W3[("dws_sales<br/>total_sales / total_amount<br/>price_sum / record_count")]
         W1 --> W2 --> W3
     end
@@ -242,8 +242,11 @@ flowchart LR
     subgraph TX2["事务 2 · 替换标准层"]
         B1["DELETE sales WHERE batch_id=?"] --> B2["INSERT sales ×N"]
     end
-    subgraph TX3["事务 3 · 重建汇总层"]
-        C1["TRUNCATE dws_sales"] --> C2["INSERT SELECT ... GROUP BY grain"]
+    subgraph TX3["事务 3 · 写入汇总刷新任务"]
+        C1["收集旧/新 grain"] --> C2["INSERT summary_refresh_tasks"]
+    end
+    subgraph TX4["worker 事务 · 增量重算"]
+        D1["SELECT ... FOR UPDATE SKIP LOCKED"] --> D2["DELETE + INSERT SELECT 受影响 grain"] --> D3["status = done"]
     end
 ```
 
@@ -251,7 +254,8 @@ flowchart LR
 |---|---|---|
 | 原始层写入 | 文件、批次、原始行全成或全败 | 不出现有文件没批次、有批次没行 |
 | 标准层替换 | 先删后插 | 同批次重复转换不翻倍 |
-| 汇总层重建 | 先清空再重算 | 汇总是派生数据，永远可重建 |
+| 汇总任务入队 | 明细写入与任务落库同事务 | 进程崩溃不会丢刷新 |
+| worker 重算 | 只重算受影响 grain，失败重试 | 请求不等待汇总，按需收敛 |
 
 转换失败时整批不写，`sales` 保持上一版，批次状态不变。任何一行的问题都会带行号返回。
 
@@ -298,36 +302,59 @@ record_count = COUNT(*)     # 记录数分母
 
 `batch_count = COUNT(DISTINCT batch_id)` 只作为血缘提示，跨行 SUM 没有意义；手工批次 `batch_id IS NULL` 不计入。
 
-### 7.3 刷新策略：当前全量重建
+### 7.3 刷新策略：增量刷新 + outbox worker
 
-```sql
-BEGIN;
-TRUNCATE dws_sales;
-INSERT INTO dws_sales (...)
-SELECT product_id, productor, name, month,
-       SUM(sales), SUM(price * sales), SUM(price), COUNT(*),
-       MIN(price), MAX(price), COUNT(DISTINCT batch_id), now()
-FROM sales
-GROUP BY product_id, productor, name, month;
-COMMIT;
+transform 和 delete 不再同步重建整张 `dws_sales`，而是在写明细的同一事务里写入 `summary_refresh_tasks`：
+
+```text
+transform 事务：
+  收集替换前 grain + 替换后 grain
+  INSERT summary_refresh_tasks(grains)
+
+delete 事务：
+  删除 sales 前收集 grain
+  INSERT summary_refresh_tasks(grains)
+  删除 sales / raw_records / import_batches
 ```
 
-| 优点 | 缺点 |
-|---|---|
-| 逻辑简单，正确性容易验证 | O(N) 全表扫描 |
-| 单事务原子 | 无法只更新局部 |
-| 无状态，可随时重跑 | 请求链路内同步执行，数据量大时阻塞分析读 |
+后台 worker 每秒轮询：
 
-将来的增量刷新需要先求受影响的 grain，再从整个 `sales` 重算这些 grain，不能只重算该批次的行，因为同一 grain 可能由多个批次共同贡献。
+```sql
+SELECT id, grains
+FROM summary_refresh_tasks
+WHERE status = 'pending' AND run_after <= now()
+ORDER BY id
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
+```
+
+然后在一个事务里：
+
+```sql
+DELETE FROM dws_sales
+WHERE (product_id, productor, name, month) IN (...);
+
+INSERT INTO dws_sales (...)
+SELECT ...
+FROM sales
+WHERE (product_id, productor, name, month) IN (...)
+GROUP BY product_id, productor, name, month;
+```
+
+只重算任务里的 grain。明细已不存在的 grain 只删不插；同一 grain 由多个批次贡献时，从整个 `sales` 重算。
 
 触发时机：
 
 ```text
-transform 成功           -> 自动刷新（mapping.Service.WithSummary 注入）
-POST /api/summary/refresh -> 手动 / 定时刷新
+transform 成功 -> 同事务入队 -> worker 异步重算
+delete 成功    -> 同事务入队 -> worker 异步重算
+POST /api/summary/refresh/:id   -> 同步重算单个批次
+POST /api/summary/refresh-all   -> 同步全量兜底
 ```
 
-刷新失败不会让 transform 失败，错误通过 `summary_error` 返回。
+worker 失败时任务回到 `pending`，按 `attempts` 退避重试；超过 10 次标记为 `failed`，需人工排查后调用全量刷新。
+
+接口返回的 `summary_pending=true` 表示任务已入队，不表示汇总已更新；`dws_sales` 允许短暂滞后。
 
 ### 7.4 一致性
 
@@ -355,7 +382,7 @@ POST /api/summary/refresh -> 手动 / 定时刷新
 | 列名 | `go_api/internal/raw/repository.go` | `ListColumns`（`jsonb_object_keys`） |
 | 映射规则 | `go_api/internal/mapping/` | `Upsert` + 白名单校验 |
 | 转换 | `go_api/internal/mapping/` | `Transform` -> `resolveRow` / `buildRow` |
-| 汇总 | `go_api/internal/summary/` | `RefreshAll` + `Verify` |
+| 汇总 | `go_api/internal/summary/` | `RefreshGrains` + `Worker` + `Verify` |
 | 分析 | `go_api/internal/analytics/` -> `python_code/app/` | HTTP 代理 + pandas 聚合 |
 
 ### 依赖方向
@@ -400,8 +427,9 @@ flowchart LR
 |---|---|---|
 | `POST` | `/api/mappings` | 配置或覆盖一条映射规则 |
 | `GET` | `/api/mappings?category=` | 查看某品类的规则 |
-| `POST` | `/api/imports/:id/transform` | 原始层到明细层转换（幂等） |
-| `POST` | `/api/summary/refresh` | 全量重建 `dws_sales` |
+| `POST` | `/api/imports/:id/transform` | 原始层到明细层转换（幂等，汇总任务异步刷新） |
+| `POST` | `/api/summary/refresh/:id` | 按批次同步重算受影响 grain |
+| `POST` | `/api/summary/refresh-all` | 全量兜底重建 `dws_sales` |
 | `GET` | `/api/summary/verify` | 对账：明细与汇总比较 |
 
 ### 明细层与分析层
@@ -428,6 +456,7 @@ flowchart LR
 | `field_mappings` | 映射层 | 唯一 `(category, source_column)` |
 | `sales` | 明细层 | 统一结构，`batch_id` 可溯源，`attrs` 保存非标准列 |
 | `dws_sales` | 汇总层 | 唯一 `(product_id, productor, name, month)`，含分子分母 |
+| `summary_refresh_tasks` | 汇总任务 | outbox：grain 列表、状态、重试次数、下次执行时间 |
 | `products` | 品类 | 品类维度 |
 
 ### 批次状态流转
@@ -479,11 +508,11 @@ stateDiagram-v2
 - 原始文件统一保存在 PostgreSQL `bytea` 中，文件量增长会放大数据库体积。
 - 重复上传仍然会先在 Python 侧解析一次，再去 Go 侧判重。
 - `raw_files` 没有自动清理机制，删除批次不会删除原始文件。
-- `/api/import-uploads` 信任调用方提交的 `rows` 与文件内容一致，服务端不重新解析校验。
-- 汇总层仍在请求链路内全量重建，数据量大时会阻塞。
+- `/api/import-uploads` 已用 HMAC 校验 rows 与文件指纹，但仍由 Python 负责解析，Go 不重新解析文件。
+- 汇总刷新已移到后台 worker，但分析结果允许短暂滞后；worker 故障时任务会积压，需要监控 `summary_refresh_tasks`。
 - 分析层是查询服务，不是物化的 ADS，没有报表快照和口径版本。
 - 其余待修问题见 `docs/design-review.md` 与 `docs/next-change-plan.md`。
 
 ---
 
-*本文档随架构演进更新；最近更新：2026-11-02，基线 `2fcebfe`。*
+*本文档随架构演进更新；最近更新：2026-11-09，基线 `a0bda94`。*

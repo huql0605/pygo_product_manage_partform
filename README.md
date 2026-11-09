@@ -20,7 +20,7 @@ cp python_code/.env.example python_code/.env
 # 2. 建库（只需一次）
 createdb db1
 
-# 3. 启动 Go，AutoMigrate 会自动建表（含 raw_files）并补齐 attrs 的 GIN 索引
+# 3. 启动 Go，AutoMigrate 会自动建表（含 raw_files、summary_refresh_tasks）并补齐 attrs 的 GIN 索引
 cd go_api && go run ./cmd/server
 
 # 4. 另开终端启动 Python
@@ -87,14 +87,15 @@ Base URL：`http://localhost:8080`
 | 10 | DELETE | `/api/imports/:id` | Path |
 | 11 | GET | `/api/mappings` | Query |
 | 12 | POST | `/api/mappings` | JSON Body |
-| 13 | POST | `/api/summary/refresh` | 无 |
-| 14 | GET | `/api/summary/verify` | 无 |
-| 15 | GET | `/api/analytics/sales` | Query |
-| 16 | GET | `/api/analytics/top-products` | Query |
-| 17 | GET | `/api/analytics/brands` | Query |
-| 18 | GET | `/api/analytics/monthly-trend` | Query |
-| 19 | GET | `/api/analytics/attributes` | Query |
-| 20 | POST | `/api/import-uploads` | Multipart |
+| 13 | POST | `/api/summary/refresh/:id` | Path |
+| 14 | POST | `/api/summary/refresh-all` | 无 |
+| 15 | GET | `/api/summary/verify` | 无 |
+| 16 | GET | `/api/analytics/sales` | Query |
+| 17 | GET | `/api/analytics/top-products` | Query |
+| 18 | GET | `/api/analytics/brands` | Query |
+| 19 | GET | `/api/analytics/monthly-trend` | Query |
+| 20 | GET | `/api/analytics/attributes` | Query |
+| 21 | POST | `/api/import-uploads` | Multipart |
 
 ---
 
@@ -323,12 +324,13 @@ curl -X POST http://localhost:8080/api/imports \
 | `product` | string | 品类名 |
 | `inserted` | int | 写入 `sales` 的行数 |
 | `ignored_columns` | string[] | 未能映射到标准字段、且不是标准字段名的列 |
-| `summary_refreshed` | bool | 是否已刷新汇总层 |
-| `summary_error` | string | 刷新汇总层失败时的原因（为空时该字段不出现） |
+| `summary_pending` | bool | 是否已写入异步刷新任务 |
+| `summary_refreshed` | bool | 兼容字段，异步模式下恒为 `false` |
+| `summary_error` | string | 保留字段，异步模式下不出现 |
 
 批次不存在 → `404 / 10002`；转换失败（缺字段、歧义映射、月份格式错误等）→ `400 / 10001`。
 
-> `transform` 成功后会尝试自动重建汇总层；只有 `summary_refreshed=false` 时才需要手动调用 `POST /api/summary/refresh`。
+> `transform` 在同一事务内把汇总刷新任务写入 `summary_refresh_tasks`，由后台 worker 异步重算受影响 grain。接口返回时 `dws_sales` 可能短暂滞后；需要立即全量修复时调用 `POST /api/summary/refresh-all`。
 
 ### `GET /api/imports`
 
@@ -361,15 +363,15 @@ curl -X POST http://localhost:8080/api/imports \
 |---|---|---|---|---|
 | `id` | Path | integer | 是 | 批次 id |
 
-在同一个事务内删除该批次的 `sales` 明细行、`raw_records` 与 `import_batches` 记录，随后重建汇总层。`raw_files` 中的原始文件不会随批次删除，保留用于审计和后续重放。**不可撤销**，重跑需要重新上传或从原始文件重放。
+在同一个事务内删除该批次的 `sales` 明细行、`raw_records` 与 `import_batches` 记录，并写入汇总刷新任务。删除前会先保存该批次覆盖的 grain，worker 据此重算或删除汇总行。`raw_files` 中的原始文件不会随批次删除，保留用于审计和后续重放。**不可撤销**，重跑需要重新上传或从原始文件重放。
 
 **响应 `data`**
 
 ```json
-{ "batch_id": 9, "deleted_sales": 120, "summary_refreshed": true }
+{ "batch_id": 9, "deleted_sales": 120, "summary_pending": true }
 ```
 
-批次不存在 → `404 / 10002`。若汇总层重建失败，`summary_refreshed` 为 `false` 且带上 `summary_error`，此时需手动调用 `POST /api/summary/refresh`。
+批次不存在 → `404 / 10002`。刷新由后台 worker 完成，接口返回后 `dws_sales` 可能短暂滞后；需要立即全量修复时调用 `POST /api/summary/refresh-all`。
 
 ---
 
@@ -412,19 +414,27 @@ curl -X POST http://localhost:8080/api/mappings \
 
 ## 6. 汇总层（DWS）
 
-### `POST /api/summary/refresh`
+### `POST /api/summary/refresh/:id`
 
-| 参数 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| — | — | — | 无参数 |
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+|---|---|---|---|---|
+| `id` | Path | integer | 是 | 批次 id |
 
-在一个事务内 `TRUNCATE dws_sales` 后按 `(product_id, productor, name, month)` 全量重建。
+按该批次当前明细覆盖的 grain 同步重算 `dws_sales`。适合手工修复单个批次，不影响其他 grain。
+
+### `POST /api/summary/refresh-all`
+
+无参数。在一个事务内 `DELETE FROM dws_sales` 后按 `(product_id, productor, name, month)` 全量重建，作为兜底入口。
 
 **响应 `data`**
 
 ```json
 { "rows": 200 }
 ```
+
+### 汇总刷新任务
+
+`transform` 和 `DELETE /api/imports/:id` 会在写明细的同一事务里向 `summary_refresh_tasks` 写入任务，后台 worker 每秒领取并重算。任务状态为 `pending` / `done` / `failed`，失败按 `attempts` 退避重试，超过 10 次标记为 `failed`。接口返回 `summary_pending=true` 只表示任务已入队，`dws_sales` 允许短暂滞后。
 
 ### `GET /api/summary/verify`
 

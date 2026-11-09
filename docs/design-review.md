@@ -1,7 +1,7 @@
 # 设计评审：分层数据平台（2026-11-03 复核更新）
 
 > 基线：`6e4fa82`（2026-11-03，加入 transform 互斥锁，处理并发情况下 transform 的异常）。
-> 本次复核确认 #23、#25、#31、#34 以及 #5 的状态事务问题已经修复；原始文件留存（#1）仍有缺口，上传完整性（#32）已于 2026-11-06 修复。
+> 本次复核确认 #5、#8、#23、#25、#31、#32、#34、#35 已修复；原始文件留存（#1）仍有缺口。
 > 本文保留原编号以便追溯，新增 31–35 号问题；每条结论都对应仓库中的实际代码或数据库结构。
 
 ## 0. 本轮复核说明
@@ -21,18 +21,19 @@
 |---|---|
 | `cd go_api && go build ./...` | 通过 |
 | `cd go_api && go vet ./...` | 通过 |
-| `cd go_api && go test ./...` | 通过；`mapping` 单测通过；`summary` 的 3 个集成测试因未设置 `TEST_DATABASE_URL` 跳过 |
+| `cd go_api && go test ./...` | 通过；`mapping` 单测通过；`summary` 的集成测试因未设置 `TEST_DATABASE_URL` 跳过 |
 | `cd python_code && uv run python -m unittest discover -s tests -v` | 8 个用例全部通过 |
 | 数据库结构检查 | `uk_batch_cat_file` 已修正为 `UNIQUE (category, raw_file_id)` |
 | 并发 transform 验证 | 4 个并发请求后 `sales` 行数保持 168，状态为 `mapped`，汇总对账通过 |
 | 锁等待验证 | 手动持有批次行锁后，transform 5 秒超时返回 `409 / 10005` |
+| 汇总 outbox 验证 | transform/delete 返回 `summary_pending=true`，worker 消费任务后汇总正确 |
 
 **总体结论**：
 
 - 原 #1 已基本修复：原始字节存入 `raw_files.content`，SHA-256 全局唯一，重复上传返回已有批次。
-- 原 #1 仍有缺口：没有重放接口、没有清理机制，且 Go 上传接口不校验 rows 是否真的来自文件。
-- #23 销量整数解析、#25 并发 transform、#31 批次唯一索引、#34 Python 异常类拼写、#5 状态事务均已修复。
-- 汇总层全量重建、对账不完整、手工数据不可删除、上传 rows 完整性等旧问题仍未处理。
+- 原 #1 仍有缺口：没有重放接口、没有清理机制。
+- #5、#8、#23、#25、#31、#32、#34、#35 均已修复。
+- 对账不完整、手工数据不可删除、双口径未区分等旧问题仍未处理。
 - README 与 architecture 已在上一轮同步；本轮又修正了批次索引与旧 `file_hash` 的说明。
 
 等级定义：
@@ -56,7 +57,7 @@
 | 5 | P0 | 转换失败后 `failed` 状态与上一轮数据矛盾 | 已修复 | `go_api/internal/mapping/service.go` |
 | 6 | P0 | `attrs` 只装未映射列 | 已修复 | `go_api/internal/mapping/service.go` |
 | 7 | P0 | 手工写入（`batch_id` 为空）无删除路径 | 仍存在 | `sale/service.go`、`raw/repository.go` |
-| 8 | P1 | 汇总层全量 `TRUNCATE` 重建同步跑在请求里 | 部分修复 | `summary/repository.go` |
+| 8 | P1 | 汇总层全量 `TRUNCATE` 重建同步跑在请求里 | 已修复 | `summary/repository.go`、`summary/worker.go` |
 | 9 | P1 | 对账只比 `total_sales`，无分页与上限 | 仍存在 | `summary/repository.go` |
 | 10 | P1 | 文档称 grain 能支撑全部报表 | 已修正文档 | `docs/architecture.md` |
 | 11 | P1 | 明细口径与汇总口径并存，响应不区分来源 | 仍存在 | `analytics/handler.go`、Python service |
@@ -179,6 +180,20 @@ README 已注明 `failed` 仅可能出现在历史数据中，architecture 的�
 
 2026-11-06 实测：外部持有 `import_batches.id=13` 行锁后，`DELETE /api/imports/13` 在 5.004 秒返回 `409 / 10005`，批次未被删除；删除不存在批次返回 `404 / 10002`。
 
+### 2.10 汇总增量刷新与 outbox worker（原 #8）已修复
+
+`dws_sales` 不再在请求里全量重建：
+
+- transform 和 delete 在写明细的同一事务里写入 `summary_refresh_tasks`。
+- transform 收集替换前后的 grain 并集；delete 在删除 `sales` 前收集 grain。
+- 后台 worker 用 `FOR UPDATE SKIP LOCKED` 领取任务，按 grain 执行 `DELETE + INSERT SELECT`。
+- 同一 grain 由多个批次贡献时，从整个 `sales` 重算；明细已不存在的 grain 删除汇总行。
+- 刷新使用 `pg_advisory_xact_lock` 串行化。
+- 失败任务按 `attempts` 退避重试，超过 10 次标记 `failed`。
+- `POST /api/summary/refresh-all` 保留为全量兜底，使用 `DELETE` 而不是 `TRUNCATE`。
+
+2026-11-09 实测：两个批次同一 grain 汇总正确；删除一个批次后按剩余明细重算；删除最后一个批次后汇总行消失；修改批次月份后旧 grain 删除、新 grain 生成；worker 消费任务后 `verify` 返回 `ok=true`。
+
 ---
 
 ## 3. P0：仍存在的正确性与可回溯问题
@@ -204,29 +219,7 @@ DELETE FROM sales WHERE batch_id = ?
 
 ## 4. P1：仍存在的规模与正确性问题
 
-### 4.1 汇总层增量刷新已实现，但仍同步在请求内（原 #8）部分修复
-
-`summary.Repository` 已增加 `RefreshGrains`，只重算指定 grain：
-
-- transform 在批次锁内、替换明细前后各收集一次 grain，取并集刷新。
-- delete 在 `PurgeBatch` 删除 `sales` 前收集 grain，删除后按这些 grain 重算。
-- 明细已不存在的 grain 会删除对应汇总行。
-- 刷新使用 `pg_advisory_xact_lock` 串行化。
-- `RefreshAll` 保留为手工兜底，已从 `TRUNCATE` 改为 `DELETE`。
-
-仍存在的问题：
-
-| 问题 | 说明 |
-|---|---|
-| 同步刷新 | `Transform` 和 `DeleteBatch` 仍在请求内等待汇总完成 |
-| 请求耗时 | 大 grain 刷新仍会拉长 transform / delete 响应时间 |
-| 无自动化测试 | 增量刷新、删除重算、grain 变化均未进入测试套件 |
-
-2026-11-07 实测：同一 grain 由两个批次贡献时汇总正确；删除一个批次后按剩余明细重算；删除最后一个批次后汇总行消失；修改批次月份后旧 grain 被清除、新 grain 生成；`verify` 返回 `ok=true`。
-
-**剩余建议**：把刷新放入任务表或后台 worker，请求只负责写明细并投递刷新任务；补增量刷新的集成测试。
-
-### 4.2 对账接口不完整（原 #9）仍存在
+### 4.1 对账接口不完整（原 #9）仍存在
 
 `summary.Repository.Verify` 只比较 `total_sales`：
 
@@ -236,19 +229,19 @@ DELETE FROM sales WHERE batch_id = ?
 
 **建议改法**：对账覆盖全部度量；增加 `limit` / `offset`；支持按批次或月份局部对账。
 
-### 4.3 双口径并存且无闸门（原 #11）仍存在
+### 4.2 双口径并存且无闸门（原 #11）仍存在
 
 `/api/analytics/attributes` 读 `sales`，其余四个接口读 `dws_sales`。响应体没有 `source` 和 `as_of`，路径也没有区分确认口径与探索口径。汇总滞后时，“总销量”和“按属性分组销量之和”可能对不上，系统不会提示。
 
 **建议改法**：路径区分，如 `/api/analytics/explore/attributes`；响应增加 `source` 与 `as_of`。
 
-### 4.4 transform 全量载入内存（原 #12）仍存在
+### 4.3 transform 全量载入内存（原 #12）仍存在
 
 `mapping/service.go` 仍一次读取全部 `raw_records`，构造全量 `[]sale.SaleRow` 后写入。峰值内存约为批次体积的 3 倍。
 
 **建议改法**：按 `row_index` 游标分页流式处理，边解析边分批写入。
 
-### 4.5 销量解析会静默截断、接受负数与 NaN（原 #23）已修复
+### 4.4 销量解析会静默截断、接受负数与 NaN（原 #23）已修复
 
 `mapping/transform.go` 已改为：
 
@@ -264,7 +257,7 @@ if salesNum < 0 {
 
 小数、负数、`NaN`、`Inf` 和超出 `int64` 的值都会被拒绝；测试已同步为“小数报错”。
 
-### 4.6 手工写入的 `batch_id` 未校验归属（原 #24）仍存在
+### 4.5 手工写入的 `batch_id` 未校验归属（原 #24）仍存在
 
 `POST /api/sales/batch` 允许客户端自带 `batch_id`，服务端没有校验批次是否存在、品类是否匹配。后果：
 
@@ -273,7 +266,7 @@ if salesNum < 0 {
 
 **建议改法**：手工接口不接受客户端 `batch_id`，由服务端创建 `manual` 批次；或先校验批次和品类。
 
-### 4.7 同一批次并发 transform 可产生重复明细（原 #25）已修复
+### 4.6 同一批次并发 transform 可产生重复明细（原 #25）已修复
 
 `mapping.Service.Transform` 现在在事务内先执行：
 
@@ -286,7 +279,7 @@ SELECT * FROM import_batches WHERE id = ? FOR UPDATE;
 
 实测 4 个并发 transform 后，`sales` 行数保持 168，没有翻倍；锁等待超过 5 秒返回 `409 / 10005`。
 
-### 4.8 批次唯一索引建错列组合（原 #31）已修复
+### 4.7 批次唯一索引建错列组合（原 #31）已修复
 
 模型已改为：
 
@@ -455,7 +448,7 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 更细的实施步骤见 `docs/next-change-plan.md`。总体顺序：
 
 1. **先修数据正确性**：手工 `batch_id`（#24）、手工数据删除（#7）。
-2. **再修汇总层**：增量刷新（#8）、对账覆盖（#9）、双口径标识（#11）。
+2. **再修汇总层**：对账覆盖（#9）、双口径标识（#11）。
 3. **补生命周期**：原始文件重放与清理（#1、#33）、数据库约束（#17）。
 4. **最后统一 API 语义**：4xx 映射（#13）、limit（#14）、月份校验（#16）、错误码（#28）。
 5. **持续补测试与 CI**（#21）。
@@ -473,4 +466,4 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 
 ---
 
-*本文档随代码演进更新；最近复核：2026-11-07，基线 `6e4fa82` 加 #8、#32、#35 验收。*
+*本文档随代码演进更新；最近复核：2026-11-09，基线 `a0bda94` 加 #8、#32、#35 验收。*

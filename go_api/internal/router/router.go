@@ -30,7 +30,7 @@ func New(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	summarySvc := summary.NewService(summaryRepo)
 
 	rawRepo := raw.NewRepository(db)
-	rawSvc := raw.NewService(rawRepo).WithSummary(summarySvc).WithSigningKey(cfg.Import.SigningKey)
+	rawSvc := raw.NewService(rawRepo).WithSigningKey(cfg.Import.SigningKey)
 
 	salerepo := sale.NewRepository(db)
 	salesvc := sale.NewService(salerepo, repo, rawRepo).WithTx(uow.New(db))
@@ -81,6 +81,7 @@ func MustMigrate(db *gorm.DB) {
 		&raw.ImportBatch{}, &raw.RawRecord{}, &raw.RawFile{},
 		&mapping.FieldMapping{},
 		&summary.SalesSummary{},
+		&summary.RefreshTask{},
 	); err != nil {
 		log.Fatalf("migrate failed: %v", err)
 	}

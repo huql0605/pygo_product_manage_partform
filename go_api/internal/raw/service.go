@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/huql0605/go_api/internal/summary"
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
@@ -17,24 +16,13 @@ import (
 var ErrBatchNotFound = errors.New("批次不存在")
 var ErrBatchBusy = errors.New("批次正在被其他操作占用，请稍后重试")
 
-// SummaryRefresher 由 *summary.Service 实现。删除批次后按删除前的 grain 重算。
-type SummaryRefresher interface {
-	RefreshGrains(grains []summary.Grain) (*summary.RefreshResult, error)
-}
-
 type Service struct {
 	repo       *Repository
-	summary    SummaryRefresher
 	signingKey string
 }
 
 func NewService(repo *Repository) *Service {
 	return &Service{repo: repo}
-}
-
-func (s *Service) WithSummary(r SummaryRefresher) *Service {
-	s.summary = r
-	return s
 }
 
 func (s *Service) WithSigningKey(key string) *Service {
@@ -127,7 +115,7 @@ func (s *Service) ListBatches(category, status string, page, size int) (*ListImp
 	return &ListImportsResult{Items: items, Total: total, Page: page, Size: size}, nil
 }
 
-// DeleteBatch 删除批次及其明细行与原始数据，随后重建汇总层。
+// DeleteBatch 删除批次及其明细行与原始数据，并把汇总刷新任务写入同一事务。
 // 删除不可撤销；重跑导入需要重新上传。
 func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
 	deletedSales, grains, err := s.repo.PurgeBatch(batchID)
@@ -143,15 +131,11 @@ func (s *Service) DeleteBatch(batchID uint) (*DeleteImportResult, error) {
 
 	}
 
-	res := &DeleteImportResult{BatchID: batchID, DeletedSales: deletedSales}
-	if s.summary != nil {
-		if _, err := s.summary.RefreshGrains(grains); err != nil {
-			res.SummaryError = err.Error()
-		} else {
-			res.SummaryRefreshed = true
-		}
-	}
-	return res, nil
+	return &DeleteImportResult{
+		BatchID:        batchID,
+		DeletedSales:   deletedSales,
+		SummaryPending: len(grains) > 0,
+	}, nil
 }
 
 func (s *Service) CreateBatchFromFile(in UploadImportInput) (*CreateResult, error) {

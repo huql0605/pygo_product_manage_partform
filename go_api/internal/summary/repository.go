@@ -48,68 +48,74 @@ func (r Repository) Refresh(batchID uint) (int64, error) {
 
 // RefreshGrains 只重算指定 grain。明细已不存在的 grain 会删除对应的汇总行。
 func (r Repository) RefreshGrains(grains []Grain) (int64, error) {
-	grains = uniqueGrains(grains)
-
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec(`SELECT pg_advisory_xact_lock(?)`, refreshLockKey).Error; err != nil {
-			return err
-		}
-		if len(grains) == 0 {
-			return nil
-		}
-		if err := tx.Exec(`
-			CREATE TEMP TABLE affected_grain (
-				product_id bigint NOT NULL,
-				productor text NOT NULL,
-				name text NOT NULL,
-				month varchar(7) NOT NULL
-			) ON COMMIT DROP;
-		`).Error; err != nil {
-			return err
-		}
-		if err := tx.Table("affected_grain").CreateInBatches(grains, 500).Error; err != nil {
-			return err
-		}
-		if err := tx.Exec(`
-			DELETE FROM dws_sales d
-			USING affected_grain a
-			WHERE d.product_id = a.product_id
-			AND d.productor = a.productor
-			AND d.name = a.name
-			AND d.month = a.month;
-		`).Error; err != nil {
-			return err
-		}
-		return tx.Exec(`
-			INSERT INTO dws_sales (
-				product_id , productor , name , month , total_sales , total_amount , price_sum , record_count , min_price , max_price  , batch_count , updated_at
-			)
-			SELECT
-				s.product_id,
-				s.productor,
-				s.name,
-				s.month,
-				COALESCE(SUM(s.sales),0),
-				COALESCE(SUM(s.sales * s.price),0),
-				COALESCE(SUM(s.price),0),
-				COUNT(*),
-				COALESCE(MIN(s.price),0),
-				COALESCE(MAX(s.price),0),
-				COUNT(DISTINCT s.batch_id),
-				now()
-			FROM sales s
-			JOIN affected_grain a
-			ON s.product_id = a.product_id
-			AND s.productor = a.productor
-			AND s.name = a.name
-			AND s.month = a.month
-			GROUP BY s.product_id, s.productor, s.name, s.month;
-		`).Error
+		return r.RefreshGrainsTx(tx, grains)
 	})
 	if err != nil {
 		return 0, err
 	}
 	return r.count()
+}
+
+// RefreshGrainsTx 在调用方事务内重算指定 grain。
+// worker 用它把「取任务 + 刷新 + 标记完成」放在同一个事务里。
+func (r Repository) RefreshGrainsTx(tx *gorm.DB, grains []Grain) error {
+	grains = uniqueGrains(grains)
+
+	if err := tx.Exec(`SELECT pg_advisory_xact_lock(?)`, refreshLockKey).Error; err != nil {
+		return err
+	}
+	if len(grains) == 0 {
+		return nil
+	}
+	if err := tx.Exec(`
+		CREATE TEMP TABLE affected_grain (
+			product_id bigint NOT NULL,
+			productor text NOT NULL,
+			name text NOT NULL,
+			month varchar(7) NOT NULL
+		) ON COMMIT DROP;
+	`).Error; err != nil {
+		return err
+	}
+	if err := tx.Table("affected_grain").CreateInBatches(grains, 500).Error; err != nil {
+		return err
+	}
+	if err := tx.Exec(`
+		DELETE FROM dws_sales d
+		USING affected_grain a
+		WHERE d.product_id = a.product_id
+		AND d.productor = a.productor
+		AND d.name = a.name
+		AND d.month = a.month;
+	`).Error; err != nil {
+		return err
+	}
+	return tx.Exec(`
+		INSERT INTO dws_sales (
+			product_id , productor , name , month , total_sales , total_amount , price_sum , record_count , min_price , max_price  , batch_count , updated_at
+		)
+		SELECT
+			s.product_id,
+			s.productor,
+			s.name,
+			s.month,
+			COALESCE(SUM(s.sales),0),
+			COALESCE(SUM(s.sales * s.price),0),
+			COALESCE(SUM(s.price),0),
+			COUNT(*),
+			COALESCE(MIN(s.price),0),
+			COALESCE(MAX(s.price),0),
+			COUNT(DISTINCT s.batch_id),
+			now()
+		FROM sales s
+		JOIN affected_grain a
+		ON s.product_id = a.product_id
+		AND s.productor = a.productor
+		AND s.name = a.name
+		AND s.month = a.month
+		GROUP BY s.product_id, s.productor, s.name, s.month;
+	`).Error
 }
 
 // RefreshAll 全量重建，作为手工兜底。DELETE 不取 ACCESS EXCLUSIVE 锁，读请求不会被完全阻塞。

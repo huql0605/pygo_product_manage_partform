@@ -34,7 +34,7 @@ type RuleStore interface {
 
 type SummaryRefresher interface {
 	GrainsByBatchTx(tx *gorm.DB, batchID uint) ([]summary.Grain, error)
-	RefreshGrains(grains []summary.Grain) (*summary.RefreshResult, error)
+	EnqueueRefreshTx(tx *gorm.DB, grains []summary.Grain) error
 }
 
 type Service struct {
@@ -88,9 +88,8 @@ type TransformResult struct {
 	Inserted         int      `json:"inserted"`
 	IgnoredColumns   []string `json:"ignored_columns"` // ExtraColumns 未映射到标准字段的列，但值已写入 sales.attrs，数据未丢弃。
 	SummaryRefreshed bool     `json:"summary_refreshed"`
+	SummaryPending   bool     `json:"summary_pending"`
 	SummaryError     string   `json:"summary_error,omitempty"`
-
-	grains []summary.Grain
 }
 
 // Transform 把某批次的原始数据翻译成标准层（sales）数据。
@@ -110,16 +109,7 @@ func (s *Service) Transform(batchID uint) (*TransformResult, error) {
 	if err != nil {
 		return nil, normalizeTransformError(err)
 	}
-
-	if s.summary != nil {
-		if _, err := s.summary.RefreshGrains(res.grains); err != nil {
-			res.SummaryError = err.Error()
-		} else {
-			res.SummaryRefreshed = true
-		}
-	}
 	return res, nil
-
 }
 
 // transform 只负责核心转换，不碰批次状态。
@@ -170,6 +160,9 @@ func (s *Service) transformTx(tx *gorm.DB, batchID uint) (*TransformResult, erro
 			return nil, err
 		}
 		grains = mergeGrains(oldGrains, newGrains)
+		if err := s.summary.EnqueueRefreshTx(tx, grains); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := s.raws.UpdateStatusTx(
@@ -183,7 +176,7 @@ func (s *Service) transformTx(tx *gorm.DB, batchID uint) (*TransformResult, erro
 		Product:        batch.Category,
 		Inserted:       replaceRes.Inserted,
 		IgnoredColumns: sortedKeys(ignoredSet),
-		grains:         grains,
+		SummaryPending: s.summary != nil,
 	}, nil
 }
 

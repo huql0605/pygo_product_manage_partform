@@ -130,6 +130,9 @@ func (r *Repository) PurgeBatch(id uint) (int64, []summary.Grain, error) {
 		`, id).Scan(&grains).Error; err != nil {
 			return err
 		}
+		if err := summary.EnqueueRefreshTx(tx, grains); err != nil {
+			return err
+		}
 
 		res = tx.Exec("DELETE FROM sales WHERE batch_id = ?", id)
 		if res.Error != nil {
