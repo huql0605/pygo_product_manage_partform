@@ -15,15 +15,22 @@ const (
 	maxTaskAttempts = 10
 )
 
-// RefreshTask 是汇总刷新的 outbox 记录。
+// RefreshTask 是汇总刷新的 outbox 记录，对应表 summary_refresh_tasks。
 // 它和明细写入在同一个事务里落库，worker 只处理已提交的任务。
 type RefreshTask struct {
-	ID        int64     `json:"id" gorm:"primarykey"`
-	Grains    string    `json:"grains" gorm:"type:text;not null"`
-	Status    string    `json:"status" gorm:"not null;default:pending;index"`
-	Attempts  int       `json:"attempts" gorm:"not null;default:0"`
-	RunAfter  time.Time `json:"run_after" gorm:"not null;default:now();index"`
-	LastError string    `json:"last_error" gorm:"type:text;not null;default:''"`
+	// ID 自增主键。
+	ID int64 `json:"id" gorm:"primarykey"`
+	// Grains 待重算的 grain 列表，JSON 数组文本，元素为 {product_id, productor, name, month}。
+	Grains string `json:"grains" gorm:"type:text;not null"`
+	// Status 任务状态：pending / done / failed，见 TaskPending 等常量。
+	Status string `json:"status" gorm:"not null;default:pending;index"`
+	// Attempts 已失败次数；达到 maxTaskAttempts（10）后状态置为 failed。
+	Attempts int `json:"attempts" gorm:"not null;default:0"`
+	// RunAfter 下次可执行时间；失败后按 2^attempts 秒退避（最大 64 秒）。
+	RunAfter time.Time `json:"run_after" gorm:"not null;default:now();index"`
+	// LastError 最近一次失败原因；刷新成功后清空。
+	LastError string `json:"last_error" gorm:"type:text;not null;default:''"`
+	// CreatedAt 任务入队时间，由 GORM 自动维护。
 	CreatedAt time.Time `json:"created_at"`
 }
 
